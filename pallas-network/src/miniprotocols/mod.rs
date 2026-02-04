@@ -7,6 +7,7 @@ mod common;
 
 pub mod blockfetch;
 pub mod chainsync;
+pub mod datapoints;
 pub mod ekgmetrics;
 pub mod handshake;
 pub mod keepalive;

@@ -83,6 +83,9 @@ pub const PROTOCOL_TFWP_EKG_METRICS: u16 = 1;
 /// Protocol channel number for trace forwarding protocol trace objects
 pub const PROTOCOL_TFWP_TRACE_OBJECTS: u16 = 2;
 
+/// Protocol channel number for trace forwarding protocol datapoints tracing
+pub const PROTOCOL_TFWP_DATAPOINTS: u16 = 3;
+
 /// A point within a chain
 #[derive(Clone, Eq, PartialEq, Hash)]
 pub enum Point {
