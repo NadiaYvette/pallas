@@ -77,6 +77,9 @@ pub const PROTOCOL_N2C_MSG_SUBMISSION: u16 = 14;
 /// This protocol is available only on the DMQ node.
 pub const PROTOCOL_N2C_MSG_NOTIFICATION: u16 = 15;
 
+/// Protocol channel number for trace forwarding protocol EKG metric tracing
+pub const PROTOCOL_TFWP_EKG_METRICS: u16 = 1;
+
 /// Protocol channel number for trace forwarding protocol trace objects
 pub const PROTOCOL_TFWP_TRACE_OBJECTS: u16 = 2;
 
