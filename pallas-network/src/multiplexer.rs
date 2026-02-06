@@ -394,9 +394,33 @@ type ToPlexerPort = tokio::sync::mpsc::Sender<(Protocol, Payload)>;
 type FromPlexerPort = tokio::sync::mpsc::Receiver<Payload>;
 
 pub struct AgentChannel {
-    protocol: Protocol,
+    pub protocol: Protocol,
     to_plexer: ToPlexerPort,
     from_plexer: FromPlexerPort,
+}
+
+pub struct AgentSender {
+    protocol: Protocol,
+    to_plexer: ToPlexerPort,
+}
+
+impl AgentSender {
+    pub async fn enqueue_chunk(&mut self, chunk: Payload) -> Result<(), Error> {
+        self.to_plexer
+            .send((self.protocol, chunk))
+            .await
+            .map_err(|SendError((protocol, payload))| Error::AgentEnqueue(protocol, payload))
+    }
+}
+
+pub struct AgentReceiver {
+    from_plexer: FromPlexerPort,
+}
+
+impl AgentReceiver {
+    pub async fn dequeue_chunk(&mut self) -> Result<Payload, Error> {
+        self.from_plexer.recv().await.ok_or(Error::AgentDequeue)
+    }
 }
 
 impl AgentChannel {
@@ -433,6 +457,18 @@ impl AgentChannel {
 
     pub async fn dequeue_chunk(&mut self) -> Result<Payload, Error> {
         self.from_plexer.recv().await.ok_or(Error::AgentDequeue)
+    }
+
+    pub fn into_split(self) -> (AgentSender, AgentReceiver) {
+        (
+            AgentSender {
+                protocol: self.protocol,
+                to_plexer: self.to_plexer,
+            },
+            AgentReceiver {
+                from_plexer: self.from_plexer,
+            },
+        )
     }
 }
 
@@ -579,6 +615,74 @@ impl ChannelBuffer {
 impl From<AgentChannel> for ChannelBuffer {
     fn from(channel: AgentChannel) -> Self {
         ChannelBuffer::new(channel)
+    }
+}
+
+pub struct ChannelBufferSender {
+    sender: AgentSender,
+}
+
+impl ChannelBufferSender {
+    pub fn new(sender: AgentSender) -> Self {
+        Self { sender }
+    }
+
+    pub async fn send_msg_chunks<M>(&mut self, msg: &M) -> Result<(), Error>
+    where
+        M: Fragment,
+    {
+        let mut payload = Vec::new();
+        minicbor::encode(msg, &mut payload).map_err(|err| Error::Encoding(err.to_string()))?;
+
+        let chunks = payload.chunks(MAX_SEGMENT_PAYLOAD_LENGTH);
+
+        for chunk in chunks {
+            self.sender.enqueue_chunk(Vec::from(chunk)).await?;
+        }
+
+        Ok(())
+    }
+}
+
+pub struct ChannelBufferReceiver {
+    receiver: AgentReceiver,
+    temp: Vec<u8>,
+}
+
+impl ChannelBufferReceiver {
+    pub fn new(receiver: AgentReceiver) -> Self {
+        Self {
+            receiver,
+            temp: Vec::new(),
+        }
+    }
+
+    pub async fn recv_full_msg<M>(&mut self) -> Result<M, Error>
+    where
+        M: Fragment,
+    {
+        trace!(len = self.temp.len(), "waiting for full message");
+
+        if !self.temp.is_empty() {
+            trace!("buffer has data from previous payload");
+
+            if let Some(msg) = try_decode_message::<M>(&mut self.temp)? {
+                debug!("decoding done");
+                return Ok(msg);
+            }
+        }
+
+        loop {
+            let chunk = self.receiver.dequeue_chunk().await?;
+            self.temp.extend(chunk);
+
+            if let Some(msg) = try_decode_message::<M>(&mut self.temp)? {
+                debug!("decoding done");
+                return Ok(msg);
+            }
+
+            trace!("not enough data");
+        }
     }
 }
 
