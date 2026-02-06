@@ -21,5 +21,6 @@ members = [
   "examples/n2n-miniprotocols",
   "examples/n2c-miniprotocols",
   "examples/p2p",
-    "examples/trace-miniprotocols",
+  "examples/trace-miniprotocols",
+  "examples/trace-compat",
 ]
