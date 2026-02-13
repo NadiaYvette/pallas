@@ -16,6 +16,7 @@ use tokio::net::UnixListener;
 // use std::sync::atomic::AtomicUsize;
 // use std::sync::Arc;
 use pallas::codec::minicbor::{self, decode, Decode, Decoder, Encode, Encoder};
+use pallas::codec::minicbor::data::Type;
 use pallas::network::miniprotocols::traceobjects::{Message, TraceObject};
 use pallas::network::multiplexer::ChannelBuffer;
 use tokio::sync::mpsc;
@@ -180,19 +181,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
 
-                            // Use RawValue for data to avoid parsing
-                            let data_raw = match serde_json::value::RawValue::from_string(obj.to_machine.clone()) {
-                                Ok(r) => r,
-                                Err(_) => {
-                                    // Fallback to string if invalid JSON
-                                    match serde_json::to_string(&obj.to_machine) {
-                                        Ok(s) => match serde_json::value::RawValue::from_string(s) {
-                                            Ok(r) => r,
-                                            Err(_) => continue, // Should not happen
-                                        },
-                                        Err(_) => continue,
-                                    }
-                                }
+                            // Convert AnyCbor to JSON Value
+                            let data_json = match decode_cbor_to_json(&mut pallas::codec::minicbor::Decoder::new(obj.to_machine.raw_bytes())) {
+                                Ok(v) => v,
+                                Err(_) => serde_json::Value::String(hex::encode(obj.to_machine.raw_bytes())),
                             };
 
                             let json_obj = serde_json::json!({
@@ -201,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "sev": format!("{:?}", obj.severity),
                                 "thread": obj.thread_id,
                                 "host": obj.hostname,
-                                "data": data_raw
+                                "data": data_json
                             });
 
                             if let Err(e) = writeln!(writer, "{}", json_obj.to_string()) {
@@ -504,4 +496,74 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+fn decode_cbor_to_json(d: &mut Decoder) -> Result<serde_json::Value, decode::Error> {
+    match d.datatype()? {
+        Type::Null => { d.null()?; Ok(serde_json::Value::Null) },
+        Type::Bool => Ok(serde_json::Value::Bool(d.bool()?)),
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 => Ok(serde_json::json!(d.u64()?)),
+        Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::Int => Ok(serde_json::json!(d.i64()?)),
+        Type::F16 => Ok(serde_json::json!(d.f16()?)),
+        Type::F32 => Ok(serde_json::json!(d.f32()?)),
+        Type::F64 => Ok(serde_json::json!(d.f64()?)),
+        Type::String | Type::StringIndef => Ok(serde_json::Value::String(d.str()?.to_string())),
+        Type::Bytes | Type::BytesIndef => Ok(serde_json::Value::String(hex::encode(d.bytes()?))),
+        Type::Array | Type::ArrayIndef => {
+            let len = d.array()?;
+            let mut vec = Vec::new();
+            match len {
+                Some(l) => {
+                    for _ in 0..l {
+                        vec.push(decode_cbor_to_json(d)?);
+                    }
+                }
+                None => {
+                    while d.datatype()? != Type::Break {
+                        vec.push(decode_cbor_to_json(d)?);
+                    }
+                    d.skip()?; // Break
+                }
+            }
+            Ok(serde_json::Value::Array(vec))
+        },
+        Type::Map | Type::MapIndef => {
+            let len = d.map()?;
+            let mut map = serde_json::Map::new();
+            match len {
+                Some(l) => {
+                    for _ in 0..l {
+                        let key = decode_cbor_to_json(d)?;
+                        let val = decode_cbor_to_json(d)?;
+                        if let serde_json::Value::String(k) = key {
+                             map.insert(k, val);
+                        } else {
+                             map.insert(key.to_string(), val);
+                        }
+                    }
+                }
+                None => {
+                    while d.datatype()? != Type::Break {
+                        let key = decode_cbor_to_json(d)?;
+                        let val = decode_cbor_to_json(d)?;
+                        if let serde_json::Value::String(k) = key {
+                             map.insert(k, val);
+                        } else {
+                             map.insert(key.to_string(), val);
+                        }
+                    }
+                    d.skip()?; // Break
+                }
+            }
+            Ok(serde_json::Value::Object(map))
+        },
+        Type::Tag => {
+            d.tag()?;
+            decode_cbor_to_json(d)
+        },
+        _ => {
+            d.skip()?;
+            Ok(serde_json::Value::Null)
+        }
+    }
 }

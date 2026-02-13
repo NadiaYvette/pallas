@@ -18,6 +18,7 @@ use pallas_codec::minicbor::{
     data::{Tag, Type},
     decode, encode, Decode, Decoder, Encode, Encoder,
 };
+use pallas_codec::utils::AnyCbor;
 // use tracing::info;
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
@@ -216,7 +217,7 @@ where
 pub struct TraceObject {
     pub kind: Option<u8>, // New field observed in trace-forward (00)
     pub to_human: Option<String>,
-    pub to_machine: String,
+    pub to_machine: AnyCbor,
     pub to_namespace: Vec<String>,
     pub severity: Severity,
     pub detail: Detail,
@@ -397,6 +398,9 @@ impl Encode<()> for Message {
                 e.array(3)?;
                 e.u16(1)?;
                 e.bool(*blocking)?;
+                // Encode n as [0, n] for compatibility with cardano-tracer
+                e.array(2)?;
+                e.u16(0)?;
                 e.u16(*n)?;
             }
             Message::Response(objects) => {
