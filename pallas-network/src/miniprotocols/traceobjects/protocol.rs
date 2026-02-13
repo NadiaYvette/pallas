@@ -236,17 +236,20 @@ impl<'b, C> Decode<'b, C> for TraceObject {
         if matches!(d.datatype(), Ok(Type::String) | Ok(Type::StringIndef)) {
             let s = d.str()?;
             // Return a dummy TraceObject wrapping this string
-            return Ok(TraceObject {
-                kind: None,
-                to_human: Some(s.to_string()),
-                to_machine: s.to_string(),
-                to_namespace: vec!["StringFallback".to_string()],
-                severity: Severity::Info,
-                detail: Detail::Normal,
-                timestamp: TraceTimestamp { day: 0, pico: 0 },
-                hostname: "".to_string(),
-                thread_id: "".to_string(),
-            });
+            // return Ok(TraceObject {
+            // kind: None,
+            // to_human: Some(s.to_string()),
+            // to_machine: s.to_string(),
+            // to_namespace: vec!["StringFallback".to_string()],
+            // severity: Severity::Info,
+            // detail: Detail::Normal,
+            // timestamp: TraceTimestamp { day: 0, pico: 0 },
+            // hostname: "".to_string(),
+            // thread_id: "".to_string(),
+            // });
+            return Err(decode::Error::message(format!(
+                "Invalid message tag: String or StringIndef"
+            )));
         }
 
         let len = d.array()?;

@@ -1,3 +1,4 @@
+use pallas_codec::utils::AnyCbor;
 use std::fmt::Debug;
 use thiserror::*;
 use tracing::debug;
@@ -117,10 +118,7 @@ impl Server {
         }
     }
 
-    pub async fn send_response(
-        &mut self,
-        metrics: Vec<(String, MetricValue)>,
-    ) -> Result<(), ServerError> {
+    pub async fn send_response(&mut self, metrics: Vec<AnyCbor>) -> Result<(), ServerError> {
         let msg = Message::Resp(metrics);
         self.send_message(&msg).await?;
         self.0 = ServerState::Idle;

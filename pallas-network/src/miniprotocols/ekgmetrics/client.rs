@@ -1,3 +1,4 @@
+use pallas_codec::utils::AnyCbor;
 use std::fmt::Debug;
 use thiserror::*;
 use tracing::debug;
@@ -110,7 +111,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn recv_response(&mut self) -> Result<Vec<(String, MetricValue)>, ClientError> {
+    pub async fn recv_response(&mut self) -> Result<Vec<AnyCbor>, ClientError> {
         let msg = self.recv_message().await?;
         match msg {
             Message::Resp(metrics) => {

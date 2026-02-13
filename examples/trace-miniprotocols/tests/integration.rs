@@ -2,7 +2,7 @@ use pallas::codec::minicbor::{self, Decode};
 use pallas::network::{
     miniprotocols::handshake::n2c,
     miniprotocols::{
-        PROTOCOL_TFWP_DATAPOINTS, PROTOCOL_TFWP_TRACE_OBJECTS, datapoints, handshake, traceobjects,
+        datapoints, handshake, traceobjects, PROTOCOL_TFWP_DATAPOINTS, PROTOCOL_TFWP_TRACE_OBJECTS,
     },
     multiplexer::{Bearer, Plexer},
 };

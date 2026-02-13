@@ -14,6 +14,8 @@
 //! definition.
 
 use pallas_codec::minicbor::{self, data::Type, decode, encode, Decode, Decoder, Encode, Encoder};
+use pallas_codec::utils::AnyCbor;
+use tracing::{error, info};
 
 #[derive(Clone, Debug, PartialEq, Eq, Decode, Encode)]
 pub enum MetricValue {
@@ -80,7 +82,7 @@ impl<'b> Decode<'b, ()> for Request {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Req(Request),
-    Resp(Vec<(String, MetricValue)>),
+    Resp(Vec<AnyCbor>),
     Done,
 }
 
@@ -103,7 +105,7 @@ impl Encode<()> for Message {
             }
             Message::Done => {
                 e.array(1)?;
-                e.u16(1)?;
+                e.u16(2)?;
             }
         }
         Ok(())
@@ -126,14 +128,25 @@ impl<'b> Decode<'b, ()> for Message {
             match (tag, len) {
                 (0, 2) => Ok(Message::Req(d.decode()?)),
                 (1, 1) => Ok(Message::Done),
-                (1, 2) => Ok(Message::Resp(d.decode()?)),
+                (1, 2) => {
+                    // Debugging payload
+                    let dt = d.datatype()?;
+                    info!("EKG Resp payload type: {:?}", dt);
+                    if dt == Type::U8 {
+                        let val = d.u8()?;
+                        info!("EKG Resp payload is U8: {}", val);
+                        return Err(minicbor::decode::Error::message("Unexpected U8 payload"));
+                    }
+                    Ok(Message::Resp(d.decode()?))
+                }
+                (2, 1) => Ok(Message::Done),
                 _ => Err(minicbor::decode::Error::message("Invalid message")),
             }
         } else {
             // Assume it's just the tag (u16/u8) for Done
             let tag = d.u16()?;
             match tag {
-                1 => Ok(Message::Done), // Done is tag 1
+                2 => Ok(Message::Done), // Done is tag 2
                 _ => Err(minicbor::decode::Error::message("Invalid message tag")),
             }
         }

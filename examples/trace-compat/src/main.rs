@@ -1,7 +1,11 @@
 use clap::Parser;
+use pallas::codec::utils::AnyCbor;
 use pallas::network::{
     miniprotocols::handshake::n2c,
-    miniprotocols::{handshake, PROTOCOL_TFWP_TRACE_OBJECTS},
+    miniprotocols::{
+        datapoints, ekgmetrics, handshake, PROTOCOL_TFWP_DATAPOINTS, PROTOCOL_TFWP_EKG_METRICS,
+        PROTOCOL_TFWP_TRACE_OBJECTS,
+    },
     multiplexer::{Bearer, Plexer},
 };
 use serde::Deserialize;
@@ -97,6 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn global writer task
     let (tx, mut rx) = mpsc::channel::<TraceObject>(100_000);
+    let (ekg_tx, mut ekg_rx) = mpsc::channel::<Vec<AnyCbor>>(100_000);
+    let (dp_tx, mut dp_rx) = mpsc::channel::<Vec<(String, Option<Vec<u8>>)>>(100_000);
     let writer_log_root = log_root.clone();
 
     let writer_handle = tokio::spawn(async move {
@@ -109,8 +115,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
         let file_path = subdir.join("node-1.json");
+        let ekg_path = subdir.join("ekg.json");
+        let dp_path = subdir.join("datapoints.json");
 
-        let file = match std::fs::OpenOptions::new()
+        let mut file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&file_path)
@@ -122,7 +130,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        let mut ekg_file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&ekg_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to open ekg file: {:?}", e);
+                return;
+            }
+        };
+
+        let mut dp_file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&dp_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to open datapoints file: {:?}", e);
+                return;
+            }
+        };
+
         let mut writer = BufWriter::new(file);
+        let mut ekg_writer = BufWriter::new(ekg_file);
+        let mut dp_writer = BufWriter::new(dp_file);
 
         // Write an empty line at the start to satisfy the Haskell test's expectation
         // (lineLength - 1) The test subtracts 1 from the line count, implying
@@ -135,61 +169,161 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut count = 0;
         loop {
-            let obj = match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-                .await
-            {
-                Ok(Some(obj)) => obj,
-                Ok(None) => break, // Channel closed
-                Err(_) => {
-                    // Timeout, flush to ensure data is on disk if test harness checks
-                    if let Err(e) = writer.flush() {
-                        error!("Failed to flush log: {:?}", e);
+            tokio::select! {
+                res = rx.recv() => {
+                    match res {
+                        Some(obj) => {
+                             // Convert to JSON and write
+                            // Filter out dummy objects from String fallback
+                            if obj.to_namespace.contains(&"StringFallback".to_string()) {
+                                // info!("Skipping dummy object: {:?}", obj.to_human);
+                                continue;
+                            }
+
+                            // Use RawValue for data to avoid parsing
+                            let data_raw = match serde_json::value::RawValue::from_string(obj.to_machine.clone()) {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    // Fallback to string if invalid JSON
+                                    match serde_json::to_string(&obj.to_machine) {
+                                        Ok(s) => match serde_json::value::RawValue::from_string(s) {
+                                            Ok(r) => r,
+                                            Err(_) => continue, // Should not happen
+                                        },
+                                        Err(_) => continue,
+                                    }
+                                }
+                            };
+
+                            let json_obj = serde_json::json!({
+                                "at": format!("{}.{:012}", obj.timestamp.day, obj.timestamp.pico),
+                                "ns": obj.to_namespace,
+                                "sev": format!("{:?}", obj.severity),
+                                "thread": obj.thread_id,
+                                "host": obj.hostname,
+                                "data": data_raw
+                            });
+
+                            if let Err(e) = writeln!(writer, "{}", json_obj.to_string()) {
+                                error!("Failed to write log: {:?}", e);
+                            }
+
+                            count += 1;
+                            if count >= 5000 {
+                                if let Err(e) = writer.flush() {
+                                    error!("Failed to flush log: {:?}", e);
+                                }
+                                count = 0;
+                            }
+                        }
+                        None => break, // Main channel closed
                     }
-                    continue;
                 }
-            };
+                res = ekg_rx.recv() => {
+                    match res {
+                        Some(metrics) => {
+                            if metrics.len() >= 2 {
+                                // metrics[0] is 0 (unknown tag/version?)
+                                // metrics[1] is the actual metrics list
+                                // It seems to be encoded as [ [String, [index, value]], ... ]
+                                // We decode it as Vec<(String, AnyCbor)> to inspect the value structure.
+                                let metrics_cbor = &metrics[1];
+                                let items_res: Result<Vec<(String, AnyCbor)>, _> =
+                                    pallas::codec::minicbor::decode(metrics_cbor.raw_bytes());
 
-            // Convert to JSON and write
-            // Filter out dummy objects from String fallback
-            if obj.to_namespace.contains(&"StringFallback".to_string()) {
-                // info!("Skipping dummy object: {:?}", obj.to_human);
-                continue;
-            }
+                                match items_res {
+                                    Ok(items) => {
+                                        for (name, val_any) in items {
+                                            // val_any should be [index, value]
+                                            // Try to decode as (u8, AnyCbor)
+                                            let mv_res: Result<(u8, AnyCbor), _> =
+                                                pallas::codec::minicbor::decode(val_any.raw_bytes());
 
-            // Use RawValue for data to avoid parsing
-            let data_raw = match serde_json::value::RawValue::from_string(obj.to_machine.clone()) {
-                Ok(r) => r,
-                Err(_) => {
-                    // Fallback to string if invalid JSON
-                    match serde_json::to_string(&obj.to_machine) {
-                        Ok(s) => match serde_json::value::RawValue::from_string(s) {
-                            Ok(r) => r,
-                            Err(_) => continue, // Should not happen
-                        },
-                        Err(_) => continue,
-                    }
+                                            match mv_res {
+                                                Ok((idx, val_inner)) => {
+                                                    let val_json = match idx {
+                                                        0 => { // Counter
+                                                            let v: i64 = pallas::codec::minicbor::decode(val_inner.raw_bytes()).unwrap_or(0);
+                                                            serde_json::json!({"type": "Counter", "val": v})
+                                                        },
+                                                        1 => { // Gauge
+                                                            let v: i64 = pallas::codec::minicbor::decode(val_inner.raw_bytes()).unwrap_or(0);
+                                                            serde_json::json!({"type": "Gauge", "val": v})
+                                                        },
+                                                        2 => { // Label
+                                                            let v: String = pallas::codec::minicbor::decode(val_inner.raw_bytes()).unwrap_or_default();
+                                                            serde_json::json!({"type": "Label", "val": v})
+                                                        },
+                                                        _ => serde_json::json!({"type": "Unknown", "val": 0}),
+                                                    };
+
+                                                    let json_obj = serde_json::json!({
+                                                        "name": name,
+                                                        "value": val_json
+                                                    });
+                                                    if let Err(e) = writeln!(ekg_writer, "{}", json_obj.to_string()) {
+                                                        error!("Failed to write ekg log: {:?}", e);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to decode MetricValue for {}: {:?}. Raw: {}", name, e, hex::encode(val_any.raw_bytes()));
+                                                }
+                                            }
+                                        }
+                                        let _ = ekg_writer.flush();
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to decode EKG metrics payload: {:?}. Raw: {}", e, hex::encode(metrics_cbor.raw_bytes()));
+                                    }
+                                }
+                                        } else {
+                                            // Fallback or unexpected format
+                                            for item in metrics {
+                                                info!("EKG Raw Item (unexpected format): {}", hex::encode(item.raw_bytes()));
+                                            }
+                                        }
+                                    }
+                                    None => {} // Ignore close for now, rely on main rx
+                                }
+                            }
+                            res = dp_rx.recv() => {
+                                match res {
+                                    Some(points) => {
+                                        for (name, val_opt) in points {
+                                            let val_json = match val_opt {
+                                                Some(bytes) => {
+                                                    if let Ok(json_str) = String::from_utf8(bytes.clone()) {
+                                                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                                            parsed
+                                                        } else {
+                                                            serde_json::Value::String(json_str)
+                                                        }
+                                                    } else {
+                                                        serde_json::json!({ "raw_hex": hex::encode(bytes) })
+                                                    }
+                                                }
+                                                None => serde_json::Value::Null
+                                            };
+
+                                            let json_obj = serde_json::json!({
+                                                "name": name,
+                                                "value": val_json
+                                            });
+                                            if let Err(e) = writeln!(dp_writer, "{}", json_obj.to_string()) {
+                                                error!("Failed to write dp log: {:?}", e);
+                                            }
+                                        }
+                                        let _ = dp_writer.flush();
+                                    }
+                                    None => {}
+                                }
+                            }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    // Timeout/idle, flush
+                    let _ = writer.flush();
+                    let _ = ekg_writer.flush();
+                    let _ = dp_writer.flush();
                 }
-            };
-
-            let json_obj = serde_json::json!({
-                "at": format!("{}.{:012}", obj.timestamp.day, obj.timestamp.pico),
-                "ns": obj.to_namespace,
-                "sev": format!("{:?}", obj.severity),
-                "thread": obj.thread_id,
-                "host": obj.hostname,
-                "data": data_raw
-            });
-
-            if let Err(e) = writeln!(writer, "{}", json_obj.to_string()) {
-                error!("Failed to write log: {:?}", e);
-            }
-
-            count += 1;
-            if count >= 5000 {
-                if let Err(e) = writer.flush() {
-                    error!("Failed to flush log: {:?}", e);
-                }
-                count = 0;
             }
         }
 
@@ -197,6 +331,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = writer.flush() {
             error!("Failed to flush log on exit: {:?}", e);
         }
+        let _ = ekg_writer.flush();
+        let _ = dp_writer.flush();
         info!("Writer task finished");
     });
 
@@ -209,10 +345,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match accept_res {
                     Ok((stream, _)) => {
                         let tx = tx.clone();
+                        let ekg_tx = ekg_tx.clone();
+                        let dp_tx = dp_tx.clone();
                         let mut shutdown_rx = shutdown_tx.subscribe();
                         tokio::spawn(async move {
                             tokio::select! {
-                                res = handle_connection(stream, tx) => {
+                                res = handle_connection(stream, tx, ekg_tx, dp_tx) => {
                                     if let Err(e) = res {
                                         error!("Connection error: {:?}", e);
                                     }
@@ -240,6 +378,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Drop the main sender so writer can finish when all other senders are dropped
     drop(tx);
+    drop(ekg_tx);
+    drop(dp_tx);
 
     // Wait for writer to finish
     info!("Waiting for writer to finish...");
@@ -252,29 +392,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     tx: mpsc::Sender<TraceObject>,
+    ekg_tx: mpsc::Sender<Vec<AnyCbor>>,
+    dp_tx: mpsc::Sender<Vec<(String, Option<Vec<u8>>)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bearer = Bearer::Unix(stream);
     let mut plexer = Plexer::new(bearer);
 
     let to_channel = plexer.subscribe_server(PROTOCOL_TFWP_TRACE_OBJECTS);
-    let ekg_channel = plexer.subscribe_server(1); // EKG
-    let dp_channel = plexer.subscribe_server(3); // Datapoints
+    let ekg_channel = plexer.subscribe_server(PROTOCOL_TFWP_EKG_METRICS);
+    let dp_channel = plexer.subscribe_server(PROTOCOL_TFWP_DATAPOINTS);
     let hs_channel = plexer.subscribe_server(0);
     let _plexer_handle = plexer.spawn();
 
-    // Spawn dummy handlers for EKG and Datapoints to prevent blocking if Peer waits
-    // for them
+    // Spawn EKG handler
     tokio::spawn(async move {
-        let mut channel = ekg_channel;
+        let mut client = ekgmetrics::Client::new(ekg_channel);
         loop {
-            let _ = channel.dequeue_chunk().await;
+            // Poll every 1s
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if let Err(e) = client.send_request(ekgmetrics::Request::GetAll).await {
+                error!("EKG Request Error: {:?}", e);
+                break;
+            }
+            match client.recv_response().await {
+                Ok(metrics) => {
+                    if !metrics.is_empty() {
+                        let _ = ekg_tx.send(metrics).await;
+                    }
+                }
+                Err(e) => {
+                    error!("EKG Response Error: {:?}", e);
+                    break;
+                }
+            }
         }
     });
 
+    // Spawn Datapoints handler
     tokio::spawn(async move {
-        let mut channel = dp_channel;
+        let mut client = datapoints::Client::new(dp_channel);
         loop {
-            let _ = channel.dequeue_chunk().await;
+            // Poll every 1s
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if let Err(e) = client
+                .send_request(vec!["test.datapoint".to_string()])
+                .await
+            {
+                error!("Datapoints Request Error: {:?}", e);
+                break;
+            }
+            match client.recv_response().await {
+                Ok(points) => {
+                    if !points.is_empty() {
+                        let _ = dp_tx.send(points).await;
+                    }
+                }
+                Err(e) => {
+                    error!("Datapoints Response Error: {:?}", e);
+                    break;
+                }
+            }
         }
     });
 
