@@ -1,0 +1,156 @@
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-unused-matches #-}
+
+import           Cardano.Logging
+import qualified Cardano.Logging.Types as Net
+import           Cardano.Tracer.Test.ForwardingStressTest.Script
+import           Cardano.Tracer.Test.ForwardingStressTest.Types
+import           Cardano.Tracer.Test.Utils
+import           Ouroboros.Network.Magic (NetworkMagic (..))
+import           Ouroboros.Network.NodeToClient (withIOManager)
+
+import           Control.Concurrent (threadDelay)
+import           Control.Exception
+import           Control.Monad.Extra
+import           Data.Functor ((<&>))
+import           Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import qualified Data.List as L
+import           Data.Maybe (fromMaybe)
+import           Data.Monoid
+import           Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import qualified System.Directory as Sys
+import           System.Environment (lookupEnv, setEnv, unsetEnv)
+import qualified System.IO as Sys
+import           System.PosixCompat.Files (fileExist)
+import qualified System.Process as Sys
+
+import           Test.Tasty
+import           Test.Tasty.QuickCheck
+
+import           Trace.Forward.Forwarding (initForwarding)
+import           Trace.Forward.Utils.TraceObject (writeToSink)
+
+main :: IO ()
+main = do
+    setEnv "TASTY_NUM_THREADS" "1" -- For sequential running of tests (because of Windows).
+    mbWorkdir <- lookupEnv "WORKDIR"
+
+    ts' <- getTestSetup
+             TestSetup
+             { tsTime         = Last $ Just 10.0
+             , tsThreads      = Last $ Just 5
+             , tsMessages     = Last   Nothing
+             , tsSockInternal = Last $ Just "tracer.sock"
+             , tsSockExternal = Last $ Just "tracer.sock"
+             , tsNetworkMagic = Last $ Just $ NetworkMagic 42
+             , tsWorkDir      = Last $ Just $ fromMaybe "/tmp/testTracerExt" mbWorkdir
+             }
+
+    -- 1. Prepare directory hierarchy
+    tracerRoot <- Sys.canonicalizePath $ unI (tsWorkDir ts')
+
+    putStrLn . mconcat $ [ "tsWorkDir ts: ", tracerRoot ]
+    -- Weird:  using path canonicalisation leads to process shutdown failures
+    whenM (fileExist                         tracerRoot) do
+      Sys.removeDirectoryRecursive           tracerRoot
+    Sys.createDirectoryIfMissing True       (tracerRoot <> "/logs")
+    Sys.setCurrentDirectory                  tracerRoot
+
+    let ts = ts' { tsWorkDir      = Identity tracerRoot
+                 }
+    putStrLn $ "Test setup:  " <> show ts
+
+    -- 2. Actual tests
+    msgCountersRef <- newIORef []
+    msgsRef        <- newIORef Vector.empty
+    tracerRef      <- newIORef Nothing
+    let tracerGetter = getExternalTracerState ts tracerRef
+    defaultMain (allTests ts msgCountersRef msgsRef (tracerGetter <&> snd))
+        `catch` (\ (e :: SomeException) -> do
+            unsetEnv "TASTY_NUM_THREADS"
+            trState <- readIORef tracerRef
+            case trState of
+              Nothing -> pure ()
+              Just (tracerHdl, _) ->
+                Sys.cleanupProcess (Nothing, Nothing, Nothing, tracerHdl)
+            throwIO e)
+
+allTests ::
+     TestSetup Identity
+  -> IORef [Int]
+  -> IORef (Vector Message)
+  -> IO (Trace IO Message)
+  -> TestTree
+allTests ts msgCountersRef msgsRef externalTracerGetter =
+    testGroup "Tests"
+    [ localOption (QuickCheckTests 3) $ testGroup "trace-forwarder"
+        [ testProperty "multi-threaded forwarder stress test" $
+            runScriptForwarding ts msgCountersRef msgsRef externalTracerGetter
+        ]
+    ]
+
+-- Caution:  non-thread-safe!
+getExternalTracerState ::
+     TestSetup Identity
+  -> IORef (Maybe (Sys.ProcessHandle, Trace IO Message))
+  -> IO (Sys.ProcessHandle, Trace IO Message)
+getExternalTracerState TestSetup{..} ref = do
+  state <- readIORef ref
+  case state of
+    Just st -> pure st
+    Nothing -> do
+      stdTr <- standardTracer
+      (procHdl, fwdTr) <- setupFwdTracer
+      tr <- mkCardanoTracer
+              stdTr fwdTr Nothing
+              ["Test"]
+      let st = (procHdl, tr)
+      writeIORef ref $ Just st
+      pure st
+ where
+   setupFwdTracer :: IO (Sys.ProcessHandle, Trace IO FormattedMessage)
+   setupFwdTracer = do
+     let tracerRealSock = unI tsWorkDir <> "/tracer-real.sock"
+     -- Write config for cardano-tracer listening on tracer-real.sock
+     Sys.writeFile "config.yaml" . L.unlines $
+       [ "networkMagic: " <> show (unNetworkMagic $ unI tsNetworkMagic)
+       , "network:"
+       , "  tag: AcceptAt"
+       , "  contents: \""<> tracerRealSock <>"\""
+       , "logging:"
+       , "- logRoot: \"logs\""
+       , "  logMode: FileMode"
+       , "  logFormat: ForMachine"
+       ]
+     -- 1. Start cardano-tracer on tracer-real.sock
+     externalTracerHdl <- Sys.spawnProcess "cardano-tracer"
+       [ "--config" ,    "config.yaml"
+       , "--state-dir" , unI tsWorkDir <> "/tracer-statedir"
+       ]
+     threadDelay 2_000_000
+     res <- Sys.getProcessExitCode externalTracerHdl
+     case res of
+       Nothing   -> putStrLn "cardano-tracer started.."
+       Just code ->
+         error $ "cardano-tracer failed to start with code " <> show code
+     -- 2. Start trace-proxy: node connects to tracer.sock, proxy connects to tracer-real.sock
+     binDir <- fromMaybe "../../../target/release" <$> lookupEnv "PALLAS_BIN_DIR"
+     _proxyHdl <- Sys.spawnProcess (binDir <> "/trace-proxy")
+       [ "--node-socket", unI tsSockExternal
+       , "--tracer-socket", tracerRealSock
+       , "--magic", show (unNetworkMagic $ unI tsNetworkMagic)
+       ]
+     threadDelay 1_000_000
+     resProxy <- Sys.getProcessExitCode _proxyHdl
+     case resProxy of
+       Nothing   -> putStrLn "trace-proxy started.."
+       Just code -> error $ "trace-proxy failed to start with code " <> show code
+     -- 3. Initialize forwarding connecting to tracer.sock (through proxy)
+     (forwardSink, _dpStore) <- withIOManager \iomgr -> do
+       let tracerSocketMode = Just (Net.LocalPipe (unI tsSockExternal), Initiator)
+           forwardingConf = fromMaybe defaultForwarder (tcForwarder simpleTestConfig)
+       initForwarding iomgr forwardingConf (unI tsNetworkMagic) Nothing tracerSocketMode
+     pure (externalTracerHdl, forwardTracer (writeToSink forwardSink))

@@ -1,0 +1,126 @@
+name: Upload to ghcr.io
+
+on:
+  push:
+    tags:
+      - '**'
+  # GITHUB_SHA: Last commit in the tagged release
+  # GITHUB_REF: Tag ref of release refs/tags/<tag_name>
+  release:
+    types:
+      - published
+  # GITHUB_SHA: Last commit on the GITHUB_REF branch or tag
+  # GITHUB_REF: Branch or tag that received dispatch
+  workflow_dispatch: {}
+
+env:
+  # Only to avoid some repetition
+  FLAKE_REF: github:${{ github.repository }}/${{ github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+  # We need to tell skopeo where to write the authentication token
+  REGISTRY_AUTH_FILE: ./skopeo-registry-auth-file.json
+
+jobs:
+  wait-for-hydra:
+    name: "Wait for hydra check-runs"
+    runs-on: ubuntu-latest
+    steps:
+    - name: Waiting for ci/hydra-build:required to complete
+      run: |
+        while [[ true ]]; do
+          check_name='ci/hydra-build:required'
+          conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=$check_name" --paginate --jq '.check_runs[].conclusion')
+          case "$conclusion" in
+            success)
+              echo "$check_name succeeded"
+              exit 0;;
+            '')
+              echo "$check_name pending. Waiting 30s..."
+              sleep 30;;
+            *)
+              echo "$check_name terminated unsuccessfully"
+              exit 1;;
+          esac
+        done
+
+  build:
+    needs: [wait-for-hydra]
+    name: "Upload to ghcr.io"
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install Nix
+      uses: input-output-hk/install-nix-action@v20
+
+    - name: Display flake metadata
+      id: flake-metadata
+      run: |
+        nix flake metadata ${{ env.FLAKE_REF }}
+        nix flake metadata ${{ env.FLAKE_REF }} --json | jq -r '"LOCKED_URL=\(.url)"' >> "$GITHUB_OUTPUT"
+
+    - name: Login to GitHub Container Registry
+      run: skopeo login --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} ghcr.io
+
+    # NOTE We assume that hydra has already built the image, this is
+    # reasonable since, before applying the tag, we must have already
+    # pushed the tagged commit somewhere, and Hydra will have had the
+    # change to build the image.
+
+    - name: Uploading intersectmbo/cardano-node
+      run: |
+        echo "::group::Downloading from cache"
+        nix build --accept-flake-config --print-out-paths --builders "" --max-jobs 0 --out-link ./result-node ${{ steps.flake-metadata.outputs.LOCKED_URL }}#dockerImage/node
+        echo "::endgroup::"
+
+        echo "::group::Uploading to registry"
+        skopeo copy docker-archive:./result-node docker://ghcr.io/intersectmbo/cardano-node:$GITHUB_REF_NAME
+        echo "::endgroup::"
+
+    - name: Uploading intersectmbo/cardano-submit-api
+      run: |
+        echo "::group::Downloading from cache"
+        nix build --accept-flake-config --print-out-paths --builders "" --max-jobs 0 --out-link ./result-api ${{ steps.flake-metadata.outputs.LOCKED_URL }}#dockerImage/submit-api
+        echo "::endgroup::"
+
+        echo "::group::Uploading to registry"
+        skopeo copy docker-archive:./result-api docker://ghcr.io/intersectmbo/cardano-submit-api:$GITHUB_REF_NAME
+        echo "::endgroup::"
+
+    - name: Uploading intersectmbo/cardano-tracer
+      run: |
+        echo "::group::Downloading from cache"
+        nix build --accept-flake-config --print-out-paths --builders "" --max-jobs 0 --out-link ./result-tracer ${{ steps.flake-metadata.outputs.LOCKED_URL }}#dockerImage/tracer
+        echo "::endgroup::"
+
+        echo "::group::Uploading to registry"
+        skopeo copy docker-archive:./result-tracer docker://ghcr.io/intersectmbo/cardano-tracer:$GITHUB_REF_NAME
+        echo "::endgroup::"
+
+    - name: Obtaining latest release tag
+      id: latest-tag
+      run: |
+        LATEST_TAG=$(gh api repos/$GITHUB_REPOSITORY/releases/latest --paginate --jq '.tag_name')
+        echo "LATEST_TAG=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+        echo "Latest release tag is: $LATEST_TAG"
+
+    - name: Tagging intersectmbo container latest
+      # Github releases are checked for latest tag in the first `or` operand of
+      # the if statement. However, promoted pre-releases or changed full
+      # releases do not count as a `published` event and so won't trigger
+      # this workflow.  For those use cases a manual workflow must be run
+      # from the matching release tag which the second `or` operand checks
+      # for.
+      if: |
+        (github.event_name == 'release' && github.event.release.tag_name == steps.latest-tag.outputs.LATEST_TAG) ||
+        (github.event_name == 'workflow_dispatch' && github.ref == format('refs/tags/{0}', steps.latest-tag.outputs.LATEST_TAG))
+      run: |
+        echo "::group::Tagging latest for intersectmbo/cardano-node"
+        skopeo copy docker-archive:./result-node docker://ghcr.io/intersectmbo/cardano-node:latest
+        echo "::endgroup::"
+
+        echo "::group::Tagging latest for intersectmbo/cardano-submit-api"
+        skopeo copy docker-archive:./result-api docker://ghcr.io/intersectmbo/cardano-submit-api:latest
+        echo "::endgroup::"
+
+        echo "::group::Tagging latest for intersectmbo/cardano-tracer"
+        skopeo copy docker-archive:./result-tracer docker://ghcr.io/intersectmbo/cardano-tracer:latest
+        echo "::endgroup::"

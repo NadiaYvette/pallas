@@ -9,3 +9,7 @@ RELEASE.md
 
 # temp while local development
 pallas-client
+
+# Haskell build artifacts
+test/haskell/dist-newstyle/
+test/haskell/.ghc.environment.*
