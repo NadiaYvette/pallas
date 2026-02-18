@@ -173,17 +173,65 @@ cd /tmp/proxy-test
 The proxy logs idempotency check results to stderr. Successful round-trips
 produce `Idempotency check passed`; mismatches produce hex dump warnings.
 
-### Configuring a cardano-node
+### Launching a cardano-node
 
-To connect a real cardano-node to any of the above, add to the node's
-configuration:
+To connect a real cardano-node to a Rust tracer, use the provided script.
+This requires a local clone of the
+[cardano-node](https://github.com/IntersectMBO/cardano-node) repository
+with a previously built `cardano-node` binary.
 
-```yaml
-TraceOptionForwarder:
-  filePath: "/tmp/my-test/tracer.sock"
+**One-time build** (requires the cardano-node `nix develop` shell):
+
+```bash
+cd /path/to/cardano-node && nix develop
+cabal build cardano-node
+exit   # leave the nix develop shell — it is not needed to run the node
 ```
 
-Or set the `--tracer-socket-path-connect` CLI flag.
+After building, the `nix develop` shell is **not** needed to run the script.
+The built binary is self-contained and the script locates it automatically in
+`dist-newstyle/`.
+
+**Running the node** (from any shell):
+
+```bash
+# Terminal 1: start a Rust tracer (from any shell)
+NETWORK_MAGIC=764824073 ./test/haskell/scripts/launch-cardano-tracer.sh
+# (or launch-trace-compat.sh)
+
+# Terminal 2: start the node (any shell, nix develop not required)
+CARDANO_NODE_DIR=/path/to/cardano-node /path/to/pallas/test/haskell/scripts/launch-node.sh
+```
+
+**How the script works**: The launch script uses the node config, genesis
+files, topology, and checkpoints from the cardano-node repo's own
+`configuration/cardano/` directory (which are always in sync with the node
+version). It patches the config JSON to use absolute paths, creates a
+working directory, and starts `cardano-node run` with
+`--tracer-socket-path-connect` pointing at the tracer socket.
+
+**Binary resolution**: The script finds `cardano-node` by checking, in
+order: (1) `cardano-node` on PATH, (2) a previously built binary in
+`$CARDANO_NODE_DIR/dist-newstyle/`, (3) `cabal list-bin` (only works inside
+`nix develop`).
+
+Environment variables:
+- `CARDANO_NODE_DIR` — Path to cardano-node repo (default: `~/src/cardano-node`)
+- `WORKDIR` — Node working directory (default: `/tmp/manual-cardano-node`)
+- `TRACER_SOCK` — Tracer socket to connect to (default: `/tmp/manual-cardano-tracer/tracer.sock`)
+- `NODE_PORT` — Listening port (default: `3001`)
+
+To connect manually without the script, add to the node's configuration:
+
+```json
+"TraceOptionForwarder": {
+  "connQueueSize": 64,
+  "disconnQueueSize": 128
+}
+```
+
+And pass `--tracer-socket-path-connect /tmp/manual-cardano-tracer/tracer.sock`
+on the command line.
 
 ## Output file formats
 
@@ -251,6 +299,7 @@ Shell scripts in `scripts/` for building, launching, and verifying:
 | `launch-trace-compat.sh` | Launch trace-compat in a clean workdir with default config |
 | `launch-cardano-tracer.sh` | Launch Rust cardano-tracer in a clean workdir with default config |
 | `launch-proxy-chain.sh` | Launch trace-proxy + Haskell cardano-tracer (requires `nix develop`) |
+| `launch-node.sh` | Launch a cardano-node connected to a Rust tracer (requires prior `cabal build`) |
 | `verify-logs.sh <dir>` | Verify JSON validity and structure of output log files |
 | `run-haskell-tests.sh [suite]` | Build Rust binaries and run Haskell test suites (requires `nix develop`) |
 
