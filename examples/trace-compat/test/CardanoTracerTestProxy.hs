@@ -59,6 +59,7 @@ main = do
              , tsWorkDir      = Last $ Just $ fromMaybe "/tmp/testTracerProxy" mbWorkdir
              }
 
+    projectRoot <- Sys.getCurrentDirectory
     tracerRoot <- Sys.canonicalizePath $ unI (tsWorkDir ts')
     exists <- fileExist tracerRoot
     when exists do
@@ -72,7 +73,7 @@ main = do
     msgsRef        <- newIORef Vector.empty
     tracerRef      <- newIORef Nothing
     
-    let tracerGetter = getProxyTracerState ts tracerRef
+    let tracerGetter = getProxyTracerState ts tracerRef projectRoot
     
     defaultMain (proxyTests ts msgCountersRef msgsRef tracerGetter)
         `catch` (\ (e :: SomeException) -> do
@@ -100,8 +101,9 @@ proxyTests ts msgCountersRef msgsRef tracerGetter =
 
 getProxyTracerState :: TestSetup Identity
                      -> IORef (Maybe (Sys.ProcessHandle, Sys.ProcessHandle, Trace IO Message, EKG.Store, DataPointStore))
+                     -> FilePath
                      -> IO (Sys.ProcessHandle, Sys.ProcessHandle, Trace IO Message, EKG.Store, DataPointStore)
-getProxyTracerState TestSetup{..} ref = do
+getProxyTracerState TestSetup{..} ref projectRoot = do
   state <- readIORef ref
   case state of
     Just st -> pure st
@@ -121,7 +123,7 @@ getProxyTracerState TestSetup{..} ref = do
       pure st
  where
    setupProxyTracer ekgStore = do
-     let tracerRealSock = "tracer-real.sock"
+     let tracerRealSock = unI tsWorkDir <> "/tracer-real.sock"
      let nodeSock = unI tsSockExternal -- "tracer.sock"
 
      -- 1. Start trace-compat (Tracer) listening on tracer-real.sock
@@ -131,15 +133,14 @@ getProxyTracerState TestSetup{..} ref = do
        , "  tag: AcceptAt"
        , "  contents: \""<> tracerRealSock <>"\""
        , "logging:"
-       , "- logRoot: \"logs\""
+       , "- logRoot: \"" <> unI tsWorkDir <> "/logs\""
        , "  logMode: FileMode"
        , "  logFormat: ForMachine"
        ]
      
-     tracerHdl <- Sys.spawnProcess "/home/nyc/src/pallas/target/release/trace-compat"
-       [ "--config" ,    "config.yaml"
-       ]
-     threadDelay 1_000_000
+     let cp = (Sys.proc "cabal" [ "run", "exe:cardano-tracer", "--", "--config", unI tsWorkDir <> "/config.yaml"]) { Sys.cwd = Just projectRoot }
+     (_, _, _, tracerHdl) <- Sys.createProcess cp
+     threadDelay 5_000_000
      resTracer <- Sys.getProcessExitCode tracerHdl
      case resTracer of
        Nothing   -> putStrLn "trace-compat (real tracer) started.."
@@ -194,8 +195,41 @@ runProxyTest TestSetup{..} _msgCountersRef _msgsRef tracerGetter = ioProperty do
     threadDelay 5_000_000 
 
     -- 5. Verify
-    let logsDir = unI tsWorkDir <> "/logs/sock@0"
+    let logsRootDir = unI tsWorkDir <> "/logs"
     
+    -- Wait for ANY subdirectory to appear in logsRootDir
+    let waitForSubdir path retries = do
+          exists <- Sys.doesDirectoryExist path
+          if exists 
+            then do
+              contents <- Sys.listDirectory path
+              case contents of
+                [] -> if retries > 0 then threadDelay 1_000_000 >> waitForSubdir path (retries - 1) else return Nothing
+                (d:_) -> return (Just d)
+            else if retries > 0 
+                   then threadDelay 1_000_000 >> waitForSubdir path (retries - 1)
+                   else return Nothing
+
+    mbSubDir <- waitForSubdir logsRootDir (60 :: Int)
+    subDir <- case mbSubDir of
+                Just d -> pure d
+                Nothing -> fail "No subdirectory found in logs"
+    
+    let logsDir = logsRootDir <> "/" <> subDir
+    
+    -- Wait for file existence
+    let waitForFile path retries = do
+          exists <- fileExist path
+          if exists 
+            then return True
+            else if retries > 0 
+                   then threadDelay 1_000_000 >> waitForFile path (retries - 1)
+                   else return False
+
+    -- Increase retries to 60 (60 seconds)
+    _ <- waitForFile (logsDir <> "/ekg.json") (60 :: Int)
+    _ <- waitForFile (logsDir <> "/datapoints.json") (60 :: Int)
+
     -- Check EKG
     ekgContent <- BSL.readFile (logsDir <> "/ekg.json")
     let ekgLines = BS8.lines ekgContent

@@ -181,7 +181,7 @@ async fn test_client_mode_polling() {
         to_namespace: vec!["Test".to_string()],
         severity: traceobjects::Severity::Info,
         detail: traceobjects::Detail::Normal,
-        timestamp: traceobjects::TraceTimestamp { day: 0, pico: 0 },
+        timestamp: traceobjects::TraceTimestamp::Tag1 { day: 0, pico: 0 },
         hostname: "test-node".to_string(),
         thread_id: "1".to_string(),
     };

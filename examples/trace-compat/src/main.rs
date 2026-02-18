@@ -187,8 +187,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(_) => serde_json::Value::String(hex::encode(obj.to_machine.raw_bytes())),
                             };
 
+                            let (ts_secs, ts_pico) = obj.timestamp.as_seconds_pico();
                             let json_obj = serde_json::json!({
-                                "at": format!("{}.{:012}", obj.timestamp.day, obj.timestamp.pico),
+                                "at": format!("{}.{:012}", ts_secs, ts_pico),
                                 "ns": obj.to_namespace,
                                 "sev": format!("{:?}", obj.severity),
                                 "thread": obj.thread_id,

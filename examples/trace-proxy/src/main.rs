@@ -6,7 +6,7 @@ use pallas::network::{
         traceobjects, PROTOCOL_TFWP_DATAPOINTS, PROTOCOL_TFWP_EKG_METRICS,
         PROTOCOL_TFWP_TRACE_OBJECTS,
     },
-    multiplexer::{AgentReceiver, AgentSender, Bearer, ChannelBufferSender, Plexer},
+    multiplexer::{AgentReceiver, AgentSender, Bearer, Plexer},
 };
 use std::path::PathBuf;
 use tokio::net::{UnixListener, UnixStream};
@@ -110,11 +110,10 @@ async fn handle_proxy(
         let (tracer_tx, tracer_rx) = tracer_chan.into_split();
 
         if *p == PROTOCOL_TFWP_TRACE_OBJECTS {
-            // Verify TraceObjects traffic
+            // Decode and re-encode TraceObjects to exercise protocol support
             tokio::spawn(bridge_trace_objects(node_rx, tracer_tx, "Node->Tracer"));
             tokio::spawn(bridge_trace_objects(tracer_rx, node_tx, "Tracer->Node"));
         } else {
-            // Blind forward
             let p_label = format!("Protocol {}", p);
             tokio::spawn(forward_raw(node_rx, tracer_tx, p_label.clone()));
             tokio::spawn(forward_raw(tracer_rx, node_tx, p_label));
@@ -162,48 +161,52 @@ where
     }
 }
 
-async fn bridge_trace_objects(mut rx: AgentReceiver, tx: AgentSender, label: &'static str) {
-    let mut buffer_tx = ChannelBufferSender::new(tx);
-    let mut temp = Vec::new();
+async fn bridge_trace_objects(mut rx: AgentReceiver, mut tx: AgentSender, label: &'static str) {
+    let mut decode_buf = Vec::new();
+    let mut decode_failed = false;
 
     loop {
-        // Try to decode from existing buffer
-        match try_decode_message_with_bytes::<traceobjects::Message>(&mut temp) {
-            Ok(Some((msg, raw_bytes))) => {
-                info!("{}: Forwarding Message: {:?}", label, msg);
+        // Try to decode accumulated data for diagnostic purposes
+        if !decode_failed {
+            loop {
+                match try_decode_message_with_bytes::<traceobjects::Message>(&mut decode_buf) {
+                    Ok(Some((msg, raw_bytes))) => {
+                        info!("{}: Decoded Message: {:?}", label, msg);
 
-                // Idempotency check
-                let mut reencoded = Vec::new();
-                if let Err(e) = minicbor::encode(&msg, &mut reencoded) {
-                    error!("{}: Re-encoding failed: {:?}", label, e);
-                } else {
-                    if raw_bytes != reencoded {
-                        warn!("{}: Idempotency check FAILED!", label);
-                        warn!("Original (len={}): {:02x?}", raw_bytes.len(), raw_bytes);
-                        warn!("Re-encoded (len={}): {:02x?}", reencoded.len(), reencoded);
-                    } else {
-                        info!("{}: Idempotency check passed.", label);
+                        // Idempotency check (informational only)
+                        let mut reencoded = Vec::new();
+                        if let Err(e) = minicbor::encode(&msg, &mut reencoded) {
+                            warn!("{}: Re-encoding failed: {:?}", label, e);
+                        } else if raw_bytes != reencoded {
+                            warn!("{}: Idempotency check FAILED!", label);
+                            warn!("Original (len={}): {:02x?}", raw_bytes.len(), raw_bytes);
+                            warn!("Re-encoded (len={}): {:02x?}", reencoded.len(), reencoded);
+                        } else {
+                            info!("{}: Idempotency check passed.", label);
+                        }
+                        continue; // Try to decode more from buffer
+                    }
+                    Ok(None) => break, // Need more data
+                    Err(e) => {
+                        warn!("{}: Decode Error (switching to raw forwarding): {:?}", label, e);
+                        warn!("Buffer (len={}): {:02x?}", decode_buf.len(), &decode_buf[..decode_buf.len().min(64)]);
+                        decode_failed = true;
+                        decode_buf.clear();
+                        break;
                     }
                 }
-
-                if buffer_tx.send_msg_chunks(&msg).await.is_err() {
-                    break;
-                }
-                continue;
-            }
-            Ok(None) => {
-                // Need more data
-            }
-            Err(e) => {
-                error!("{}: Decode Error: {:?}", label, e);
-                error!("Buffer (len={}): {:02x?}", temp.len(), temp);
-                break;
             }
         }
 
+        // Always forward raw chunks
         match rx.dequeue_chunk().await {
             Ok(chunk) => {
-                temp.extend(chunk);
+                if !decode_failed {
+                    decode_buf.extend(&chunk);
+                }
+                if tx.enqueue_chunk(chunk).await.is_err() {
+                    break;
+                }
             }
             Err(_) => {
                 info!("{}: Connection closed (AgentDequeue)", label);

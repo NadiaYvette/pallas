@@ -19,7 +19,6 @@ use pallas_codec::minicbor::{
     decode, encode, Decode, Decoder, Encode, Encoder,
 };
 use pallas_codec::utils::AnyCbor;
-// use tracing::info;
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
 #[cbor(index_only)]
@@ -55,14 +54,32 @@ pub enum Detail {
     Maximum,
 }
 
-/// Custom timestamp struct to match Haskell's `UTCTime` encoding.
-/// Haskell encodes `UTCTime` as a Tag 1 containing an array `[day,
-/// picoseconds]`. This differs from standard `SystemTime` encoding in
-/// `minicbor`.
+/// Timestamp preserving the original CBOR tag format for round-trip fidelity.
+///
+/// Haskell's `trace-forward` uses two timestamp encodings:
+/// - Tag 1: `[day, picoseconds_since_midnight]` — UTCTime representation
+/// - Tag 1000: `map { 1: seconds_since_epoch, -12: picoseconds_within_second }`
+///   — SystemTime representation from the `serialise` library
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TraceTimestamp {
-    pub day: i64,
-    pub pico: i64,
+pub enum TraceTimestamp {
+    /// Tag 1: [day, pico_since_midnight]
+    Tag1 { day: i64, pico: i64 },
+    /// Tag 1000: map { 1: seconds_since_epoch, -12: pico_within_second }
+    Tag1000 { seconds: i64, pico: i64 },
+}
+
+impl TraceTimestamp {
+    /// Returns (seconds_since_epoch, pico_within_second) for display/formatting.
+    pub fn as_seconds_pico(&self) -> (i64, i64) {
+        match self {
+            TraceTimestamp::Tag1 { day, pico } => {
+                let seconds = day * 86400 + pico / 1_000_000_000_000;
+                let sub_pico = pico % 1_000_000_000_000;
+                (seconds, sub_pico)
+            }
+            TraceTimestamp::Tag1000 { seconds, pico } => (*seconds, *pico),
+        }
+    }
 }
 
 impl<'b, C> Decode<'b, C> for TraceTimestamp {
@@ -73,60 +90,45 @@ impl<'b, C> Decode<'b, C> for TraceTimestamp {
             let day = d.i64()?;
             let pico = d.i64()?;
 
-            // Consume any extra fields in the timestamp array (e.g. if it has 3 items)
+            // Consume any extra fields in the timestamp array
             if let Some(l) = len {
                 for _ in 2..l {
                     d.skip()?;
                 }
             }
 
-            Ok(TraceTimestamp { day, pico })
+            Ok(TraceTimestamp::Tag1 { day, pico })
         } else if t.as_u64() == 1000 {
-            // Handle Tag 1000 (SystemTime map)
-            // Map { 1: seconds, -12: nanos? }
-            // Note: -12 is 0x2b (N(11)).
+            // Tag 1000: SystemTime map { 1: seconds, -12: picoseconds }
             let len = d.map()?;
             let mut seconds = 0i64;
-            let mut nanos = 0i64;
+            let mut pico = 0i64;
 
-            let count = len.unwrap_or(0); // If indefinite, we loop until break, but here assume definite or handle
-                                          // generic loop Actually minicbor
-                                          // map() returns Option<u64>.
-                                          // We should loop.
+            let count = len.unwrap_or(0);
 
-            // For simplicity, assume we know the keys.
-            // But order is not guaranteed.
             for _ in 0..count {
                 let key_type = d.datatype()?;
-                let key = if key_type == Type::U8
-                    || key_type == Type::U16
-                    || key_type == Type::U32
-                    || key_type == Type::U64
-                {
-                    d.i64()? // Positive key
-                } else if key_type == Type::Int {
-                    d.i64()? // Negative key
-                } else {
-                    d.skip()?;
-                    continue;
+                let key = match key_type {
+                    // Positive integer keys
+                    Type::U8 | Type::U16 | Type::U32 | Type::U64 => d.i64()?,
+                    // Negative integer keys (e.g. -12 encoded as 0x2b)
+                    Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::Int => d.i64()?,
+                    _ => {
+                        d.skip()?;
+                        continue;
+                    }
                 };
 
                 if key == 1 {
                     seconds = d.i64()?;
                 } else if key == -12 {
-                    // 0x2b
-                    nanos = d.i64()?;
+                    pico = d.i64()?;
                 } else {
                     d.skip()?;
                 }
             }
 
-            // Convert to day/pico
-            let day = seconds / 86400;
-            let rem_seconds = seconds % 86400;
-            let pico = (rem_seconds * 1_000_000_000_000) + (nanos * 1000);
-
-            Ok(TraceTimestamp { day, pico })
+            Ok(TraceTimestamp::Tag1000 { seconds, pico })
         } else {
             Err(decode::Error::message("expected timestamp tag (1 or 1000)"))
         }
@@ -139,10 +141,23 @@ impl<C> Encode<C> for TraceTimestamp {
         e: &mut Encoder<W>,
         _ctx: &mut C,
     ) -> Result<(), encode::Error<W::Error>> {
-        e.tag(Tag::new(1))?;
-        e.array(2)?;
-        e.i64(self.day)?;
-        e.i64(self.pico)?;
+        match self {
+            TraceTimestamp::Tag1 { day, pico } => {
+                e.tag(Tag::new(1))?;
+                e.array(2)?;
+                e.i64(*day)?;
+                e.i64(*pico)?;
+            }
+            TraceTimestamp::Tag1000 { seconds, pico } => {
+                e.tag(Tag::new(1000))?;
+                e.map(2)?;
+                e.i64(1)?;
+                e.i64(*seconds)?;
+                // Key -12 (CBOR negative int 11 = 0x2b)
+                e.i64(-12)?;
+                e.i64(*pico)?;
+            }
+        }
         Ok(())
     }
 }
@@ -235,19 +250,7 @@ impl<'b, C> Decode<'b, C> for TraceObject {
         // Handle case where TraceObject is represented as a String (e.g. simplified
         // logging or error)
         if matches!(d.datatype(), Ok(Type::String) | Ok(Type::StringIndef)) {
-            let s = d.str()?;
-            // Return a dummy TraceObject wrapping this string
-            // return Ok(TraceObject {
-            // kind: None,
-            // to_human: Some(s.to_string()),
-            // to_machine: s.to_string(),
-            // to_namespace: vec!["StringFallback".to_string()],
-            // severity: Severity::Info,
-            // detail: Detail::Normal,
-            // timestamp: TraceTimestamp { day: 0, pico: 0 },
-            // hostname: "".to_string(),
-            // thread_id: "".to_string(),
-            // });
+            let _s = d.str()?;
             return Err(decode::Error::message(format!(
                 "Invalid message tag: String or StringIndef"
             )));
@@ -353,9 +356,6 @@ impl<C> Encode<C> for TraceObject {
         e: &mut Encoder<W>,
         ctx: &mut C,
     ) -> Result<(), encode::Error<W::Error>> {
-        // Encode as 9 fields if kind is present, else 8?
-        // For compatibility with what we receive, we should probably encode 9 if we
-        // have it.
         if let Some(k) = self.kind {
             e.array(9)?;
             e.u8(k)?;
@@ -365,14 +365,21 @@ impl<C> Encode<C> for TraceObject {
 
         encode_maybe(e, ctx, &self.to_human)?;
 
-        // Encode to_machine wrapped?
-        // If we want to be compatible with what we receive, we should wrap it.
-        // But let's stick to standard for now unless we know we need to send it.
         e.encode(&self.to_machine)?;
 
-        e.encode(&self.to_namespace)?;
+        // Encode namespace as indefinite-length array to match Haskell's cborg
+        e.begin_array()?;
+        for ns in &self.to_namespace {
+            e.encode(ns)?;
+        }
+        e.end()?;
+
+        // Severity and Detail: Haskell encodes enum constructors as [index]
+        e.array(1)?;
         e.encode(&self.severity)?;
+        e.array(1)?;
         e.encode(&self.detail)?;
+
         e.encode_with(&self.timestamp, ctx)?;
         e.encode(&self.hostname)?;
         e.encode(&self.thread_id)?;
@@ -391,7 +398,7 @@ impl Encode<()> for Message {
     fn encode<W: encode::Write>(
         &self,
         e: &mut Encoder<W>,
-        _ctx: &mut (),
+        ctx: &mut (),
     ) -> Result<(), encode::Error<W::Error>> {
         match self {
             Message::Request(blocking, n) => {
@@ -406,7 +413,12 @@ impl Encode<()> for Message {
             Message::Response(objects) => {
                 e.array(2)?;
                 e.u16(3)?;
-                e.encode(objects)?;
+                // Indefinite-length array to match Haskell's cborg encoding
+                e.begin_array()?;
+                for obj in objects {
+                    e.encode_with(obj, ctx)?;
+                }
+                e.end()?;
             }
             Message::Done => {
                 e.array(1)?;

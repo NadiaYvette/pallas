@@ -209,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(Some((blocking, n))) => {
                             info!("TraceObjects: Req blocking={}, n={}", blocking, n);
                             // Dummy response
-                            let timestamp = traceobjects::TraceTimestamp { day: 0, pico: 0 };
+                            let timestamp = traceobjects::TraceTimestamp::Tag1 { day: 0, pico: 0 };
                             let obj = traceobjects::TraceObject {
                                 to_human: Some("Dummy Trace from Rust".to_string()),
                                 to_machine: "{}".to_string(),
