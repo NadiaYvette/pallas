@@ -1,0 +1,263 @@
+cabal-version: 3.0
+
+name:                   cardano-tracer-tests
+version:                0.1.0
+synopsis:               Haskell test infrastructure for Pallas trace-forwarding binaries
+description:            Test suites validating Pallas Rust trace-forwarding binaries
+                        (trace-compat, trace-proxy, cardano-tracer) against Haskell
+                        cardano-node tracing libraries from CHaP.
+license:                Apache-2.0
+build-type:             Simple
+
+common project-config
+  default-language:     Haskell2010
+  build-depends:        base >= 4.14 && < 5
+
+  default-extensions:   BlockArguments
+                      , CPP
+                      , DerivingStrategies
+                      , GeneralizedNewtypeDeriving
+                      , ImportQualifiedPost
+                      , InstanceSigs
+                      , ScopedTypeVariables
+                      , StandaloneKindSignatures
+                      , TypeApplications
+
+  ghc-options:          -Wall
+                        -Wcompat
+                        -Wincomplete-record-updates
+                        -Wincomplete-uni-patterns
+                        -Wno-unticked-promoted-constructors
+                        -Wno-orphans
+                        -Wpartial-fields
+                        -Wredundant-constraints
+                        -Wunused-packages
+
+  if impl(ghc >= 9.8)
+    ghc-options:        -Wno-x-partial
+
+library test-support
+  import:               project-config
+  default-extensions:   OverloadedStrings
+
+  visibility:           private
+  hs-source-dirs:       test
+
+  exposed-modules:      Cardano.Tracer.Test.Forwarder
+                        Cardano.Tracer.Test.Acceptor
+                        Cardano.Tracer.Test.TestSetup
+                        Cardano.Tracer.Test.Utils
+                        Cardano.Tracer.Test.DataPoint.Tests
+                        Cardano.Tracer.Test.Logs.Tests
+                        Cardano.Tracer.Test.Queue.Tests
+                        Cardano.Tracer.Test.Restart.Tests
+                        Cardano.Tracer.Test.ForwardingStressTest.Config
+                        Cardano.Tracer.Test.ForwardingStressTest.Messages
+                        Cardano.Tracer.Test.ForwardingStressTest.Script
+                        Cardano.Tracer.Test.ForwardingStressTest.Types
+
+  build-depends:        aeson
+                      , async
+                      , bytestring
+                      , cardano-tracer ^>= 0.3.5
+                      , cborg
+                      , containers
+                      , contra-tracer
+                      , deepseq
+                      , directory
+                      , ekg-core
+                      , ekg-forward >= 1.0
+                      , extra
+                      , filepath
+                      , generic-data
+                      , Glob
+                      , network
+                      , network-mux
+                      , optparse-applicative-fork >= 0.18.1
+                      , ouroboros-network-api
+                      , ouroboros-network-framework
+                      , stm <2.5.2 || >=2.5.3
+                      , tasty
+                      , tasty-quickcheck
+                      , text
+                      , time
+                      , trace-dispatcher ^>= 2.10.0
+                      , trace-forward ^>= 2.3.0
+                      , vector
+                      , vector-algorithms
+                      , QuickCheck
+
+test-suite cardano-tracer-test
+  import:               project-config
+  type:                 exitcode-stdio-1.0
+  default-extensions:   OverloadedStrings
+
+  if os(windows)
+    buildable:          False
+
+  hs-source-dirs:       test-exe
+
+  main-is:              cardano-tracer-test.hs
+
+  build-depends:        cardano-tracer-tests:test-support
+                      , directory
+                      , extra
+                      , tasty
+                      , unix-compat
+
+  ghc-options:          -threaded
+                        -rtsopts
+                        -with-rtsopts=-N
+
+test-suite cardano-tracer-test-ext
+  import:               project-config
+  type:                 exitcode-stdio-1.0
+  default-extensions:   OverloadedStrings
+
+  hs-source-dirs:       test-exe
+
+  main-is:              cardano-tracer-test-ext.hs
+
+  build-tool-depends:   cardano-tracer:cardano-tracer
+
+  if os(windows)
+    buildable:          False
+
+  build-depends:        cardano-tracer-tests:test-support
+                      , directory
+                      , extra
+                      , ouroboros-network ^>= 0.22.4
+                      , ouroboros-network-api
+                      , process
+                      , tasty
+                      , tasty-quickcheck
+                      , trace-dispatcher
+                      , trace-forward
+                      , unix-compat
+                      , vector
+
+  ghc-options:          -threaded
+                        -rtsopts
+                        -with-rtsopts=-N
+
+test-suite cardano-tracer-test-compat
+  import:               project-config
+  type:                 exitcode-stdio-1.0
+  default-extensions:   OverloadedStrings
+
+  hs-source-dirs:       test-exe
+
+  main-is:              cardano-tracer-test-compat.hs
+
+  if os(windows)
+    buildable:          False
+
+  build-depends:        cardano-tracer-tests:test-support
+                      , directory
+                      , extra
+                      , ouroboros-network ^>= 0.22.4
+                      , ouroboros-network-api
+                      , process
+                      , tasty
+                      , tasty-quickcheck
+                      , trace-dispatcher
+                      , trace-forward
+                      , unix-compat
+                      , vector
+
+  ghc-options:          -threaded
+                        -rtsopts
+                        -with-rtsopts=-N
+
+test-suite cardano-tracer-test-tracer
+  import:               project-config
+  type:                 exitcode-stdio-1.0
+  default-extensions:   OverloadedStrings
+
+  hs-source-dirs:       test-exe
+
+  main-is:              cardano-tracer-test-tracer.hs
+
+  if os(windows)
+    buildable:          False
+
+  build-depends:        cardano-tracer-tests:test-support
+                      , directory
+                      , extra
+                      , ouroboros-network ^>= 0.22.4
+                      , ouroboros-network-api
+                      , process
+                      , tasty
+                      , tasty-quickcheck
+                      , trace-dispatcher
+                      , trace-forward
+                      , unix-compat
+                      , vector
+
+  ghc-options:          -threaded
+                        -rtsopts
+                        -with-rtsopts=-N
+
+test-suite cardano-tracer-test-pallas
+  import:               project-config
+  type:                 exitcode-stdio-1.0
+  default-extensions:   OverloadedStrings
+
+  hs-source-dirs:       test-exe
+
+  main-is:              cardano-tracer-test-pallas.hs
+
+  if os(windows)
+    buildable:          False
+
+  build-depends:        cardano-tracer-tests:test-support
+                      , aeson
+                      , bytestring
+                      , directory
+                      , ekg-core
+                      , ouroboros-network ^>= 0.22.4
+                      , ouroboros-network-api
+                      , process
+                      , tasty
+                      , tasty-quickcheck
+                      , trace-dispatcher
+                      , trace-forward
+                      , unix-compat
+                      , vector
+
+  ghc-options:          -threaded
+                        -rtsopts
+                        -with-rtsopts=-N
+
+test-suite cardano-tracer-test-proxy
+  import:               project-config
+  type:                 exitcode-stdio-1.0
+  default-extensions:   OverloadedStrings
+
+  hs-source-dirs:       test-exe
+
+  main-is:              cardano-tracer-test-proxy.hs
+
+  build-tool-depends:   cardano-tracer:cardano-tracer
+
+  if os(windows)
+    buildable:          False
+
+  build-depends:        cardano-tracer-tests:test-support
+                      , aeson
+                      , bytestring
+                      , directory
+                      , ekg-core
+                      , ouroboros-network ^>= 0.22.4
+                      , ouroboros-network-api
+                      , process
+                      , tasty
+                      , tasty-quickcheck
+                      , trace-dispatcher
+                      , trace-forward
+                      , unix-compat
+                      , vector
+
+  ghc-options:          -threaded
+                        -rtsopts
+                        -with-rtsopts=-N

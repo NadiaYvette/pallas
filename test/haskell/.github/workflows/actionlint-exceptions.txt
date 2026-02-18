@@ -1,4 +1,0 @@
-.github/workflows/haskell.yml
-.github/workflows/release-ghcr.yaml
-.github/workflows/release-upload.yaml
-.github/workflows/stylish-haskell.yml

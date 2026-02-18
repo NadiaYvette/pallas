@@ -1,4 +1,4 @@
--- Custom repository for cardano haskell packages, see CONTRIBUTING for more
+-- Cardano Haskell Packages (CHaP) repository for trace-forwarding libraries
 repository cardano-haskell-packages
   url: https://chap.intersectmbo.org/
   secure: True
@@ -10,42 +10,20 @@ repository cardano-haskell-packages
     c00aae8461a256275598500ea0e187588c35a5d5d7454fb57eac18d9edb86a56
     d4a35cd3121aa00d18544bb0ac01c3e1691d618f462c46129271bccf39f7e8ee
 
--- See CONTRIBUTING for information about these, including some Nix commands
--- you need to run if you change them
 index-state:
   , hackage.haskell.org 2025-10-17T00:26:22Z
-  , cardano-haskell-packages 2025-11-07T15:42:47Z
+  , cardano-haskell-packages 2025-11-15T00:00:00Z
 
+-- Only our local test package; cardano-tracer, trace-forward,
+-- trace-dispatcher, and trace-resources come from CHaP.
 packages:
-  cardano-node
-  cardano-node-capi
-  cardano-node-chairman
-  cardano-submit-api
-  cardano-testnet
-  cardano-tracer
-  bench/cardano-profile
-  bench/cardano-topology
-  bench/locli
-  bench/plutus-scripts-bench
-  bench/tx-generator
-  trace-dispatcher
-  trace-resources
-  trace-forward
-
--- Needed when cross compiling
-extra-packages: alex
-
-program-options
-  ghc-options: -Werror
+  .
 
 test-show-details: direct
 
--- Always write GHC env files, because they are needed for ghci.
 write-ghc-environment-files: always
 
 package cryptonite
-  -- Using RDRAND instead of /dev/urandom as an entropy source for key
-  -- generation is dubious. Set the flag so we use /dev/urandom by default.
   flags: -support_rdrand
 
 package snap-server
@@ -54,21 +32,9 @@ package snap-server
 package bitvec
   flags: -simd
 
--- required for haddocks to build successfully
-package plutus-scripts-bench
-  haddock-options: "--optghc=-fplugin-opt PlutusTx.Plugin:defer-errors"
+-- Disable RTView in cardano-tracer (not needed for tests, avoids extra deps)
+package cardano-tracer
+  flags: -rtview
 
 allow-newer:
   , katip:Win32
-
-if impl (ghc >= 9.12)
-  allow-newer:
-    -- https://github.com/kapralVV/Unique/issues/11
-    , Unique:hashable
-
-    -- https://github.com/Gabriella439/Haskell-Pipes-Safe-Library/pull/70
-    , pipes-safe:base
-
--- IMPORTANT
--- Do NOT add more source-repository-package stanzas here unless they are strictly
--- temporary! Please read the section in CONTRIBUTING about updating dependencies.
