@@ -36,6 +36,10 @@ import           Trace.Forward.Utils.TraceObject (writeToSink)
 main :: IO ()
 main = do
     setEnv "TASTY_NUM_THREADS" "1" -- For sequential running of tests (because of Windows).
+    -- Resolve PALLAS_BIN_DIR to absolute path before we chdir to the workdir
+    binDir <- fromMaybe "../../../target/release" <$> lookupEnv "PALLAS_BIN_DIR"
+    absBinDir <- Sys.makeAbsolute binDir
+    setEnv "PALLAS_BIN_DIR" absBinDir
     mbWorkdir <- lookupEnv "WORKDIR"
 
     ts' <- getTestSetup

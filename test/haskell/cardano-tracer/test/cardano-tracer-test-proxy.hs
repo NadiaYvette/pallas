@@ -46,6 +46,10 @@ import qualified Data.ByteString.Lazy.Char8 as BS8
 main :: IO ()
 main = do
     setEnv "TASTY_NUM_THREADS" "1"
+    -- Resolve PALLAS_BIN_DIR to absolute path before we chdir to the workdir
+    binDir <- fromMaybe "../../../target/release" <$> lookupEnv "PALLAS_BIN_DIR"
+    absBinDir <- Sys.makeAbsolute binDir
+    setEnv "PALLAS_BIN_DIR" absBinDir
     mbWorkdir <- lookupEnv "WORKDIR"
 
     ts' <- getTestSetup
