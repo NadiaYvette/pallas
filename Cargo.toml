@@ -24,4 +24,5 @@ members = [
   "examples/trace-miniprotocols",
   "examples/trace-compat",
   "examples/trace-proxy",
+  "examples/cardano-tracer",
 ]
