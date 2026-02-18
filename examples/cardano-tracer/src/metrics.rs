@@ -152,3 +152,107 @@ fn escape_label_value(s: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_metric_name_dots() {
+        assert_eq!(sanitize_metric_name("rts.gc.bytes_allocated"), "rts_gc_bytes_allocated");
+    }
+
+    #[test]
+    fn test_sanitize_metric_name_dashes() {
+        assert_eq!(sanitize_metric_name("node-metrics-count"), "node_metrics_count");
+    }
+
+    #[test]
+    fn test_sanitize_metric_name_colons_preserved() {
+        assert_eq!(sanitize_metric_name("cardano:node:txs"), "cardano:node:txs");
+    }
+
+    #[test]
+    fn test_sanitize_metric_name_underscores_preserved() {
+        assert_eq!(sanitize_metric_name("my_metric_name"), "my_metric_name");
+    }
+
+    #[test]
+    fn test_sanitize_metric_name_mixed() {
+        assert_eq!(
+            sanitize_metric_name("rts.gc.par-tot-bytes-copied"),
+            "rts_gc_par_tot_bytes_copied"
+        );
+    }
+
+    #[test]
+    fn test_escape_label_value_plain() {
+        assert_eq!(escape_label_value("hello"), "hello");
+    }
+
+    #[test]
+    fn test_escape_label_value_backslash() {
+        assert_eq!(escape_label_value("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_escape_label_value_quote() {
+        assert_eq!(escape_label_value("say \"hi\""), "say \\\"hi\\\"");
+    }
+
+    #[test]
+    fn test_escape_label_value_newline() {
+        assert_eq!(escape_label_value("line1\nline2"), "line1\\nline2");
+    }
+
+    #[test]
+    fn test_escape_label_value_combined() {
+        assert_eq!(
+            escape_label_value("a\\b\"c\nd"),
+            "a\\\\b\\\"c\\nd"
+        );
+    }
+
+    #[test]
+    fn test_prometheus_counter_format() {
+        let entry = crate::node::MetricEntry {
+            name: "tx.count".to_string(),
+            value: MetricValue::Counter(42),
+        };
+        let sanitized = sanitize_metric_name(&entry.name);
+        let mut output = String::new();
+        output.push_str(&format!("# TYPE {} counter\n", sanitized));
+        output.push_str(&format!("{} {}\n", sanitized, 42));
+        assert_eq!(output, "# TYPE tx_count counter\ntx_count 42\n");
+    }
+
+    #[test]
+    fn test_prometheus_gauge_format() {
+        let entry = crate::node::MetricEntry {
+            name: "mem.used".to_string(),
+            value: MetricValue::Gauge(1024),
+        };
+        let sanitized = sanitize_metric_name(&entry.name);
+        let mut output = String::new();
+        output.push_str(&format!("# TYPE {} gauge\n", sanitized));
+        output.push_str(&format!("{} {}\n", sanitized, 1024));
+        assert_eq!(output, "# TYPE mem_used gauge\nmem_used 1024\n");
+    }
+
+    #[test]
+    fn test_prometheus_label_format() {
+        let entry = crate::node::MetricEntry {
+            name: "node.version".to_string(),
+            value: MetricValue::Label("1.35.4".to_string()),
+        };
+        let sanitized = sanitize_metric_name(&entry.name);
+        let escaped = escape_label_value("1.35.4");
+        let mut output = String::new();
+        output.push_str(&format!("# TYPE {} gauge\n", sanitized));
+        output.push_str(&format!("{}{{value=\"{}\"}} 1\n", sanitized, escaped));
+        assert_eq!(
+            output,
+            "# TYPE node_version gauge\nnode_version{value=\"1.35.4\"} 1\n"
+        );
+    }
+}

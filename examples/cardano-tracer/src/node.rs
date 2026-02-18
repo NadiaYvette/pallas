@@ -110,3 +110,110 @@ pub fn slug_for_node(name: &str) -> String {
         .collect::<String>()
         .to_lowercase()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_and_get_node_name() {
+        let mut reg = NodeRegistry::new();
+        let id = NodeId("node-1".to_string());
+        reg.register_node(id.clone(), "my-node".to_string());
+        assert_eq!(reg.get_node_name(&id), Some("my-node".to_string()));
+    }
+
+    #[test]
+    fn test_deregister_node() {
+        let mut reg = NodeRegistry::new();
+        let id = NodeId("node-1".to_string());
+        reg.register_node(id.clone(), "my-node".to_string());
+        reg.deregister_node(&id);
+        assert_eq!(reg.get_node_name(&id), None);
+    }
+
+    #[test]
+    fn test_update_node_name() {
+        let mut reg = NodeRegistry::new();
+        let id = NodeId("node-1".to_string());
+        reg.register_node(id.clone(), "initial".to_string());
+        reg.update_node_name(&id, "updated".to_string());
+        assert_eq!(reg.get_node_name(&id), Some("updated".to_string()));
+    }
+
+    #[test]
+    fn test_update_metrics() {
+        let mut reg = NodeRegistry::new();
+        let id = NodeId("node-1".to_string());
+        reg.register_node(id.clone(), "my-node".to_string());
+
+        let metrics = vec![
+            MetricEntry {
+                name: "cpu".to_string(),
+                value: MetricValue::Gauge(42),
+            },
+            MetricEntry {
+                name: "txs".to_string(),
+                value: MetricValue::Counter(100),
+            },
+        ];
+        reg.update_metrics(&id, metrics);
+
+        let all = reg.all_nodes();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "my-node");
+        assert_eq!(all[0].1.len(), 2);
+    }
+
+    #[test]
+    fn test_node_id_from_address_unix() {
+        let id = node_id_from_address("/tmp/test.sock@0");
+        // slashes replaced with dashes, double-dashes removed, leading dash trimmed
+        assert!(!id.0.contains('/'));
+        assert!(!id.0.contains("--"));
+        assert!(!id.0.starts_with('-'));
+        assert!(!id.0.ends_with('-'));
+    }
+
+    #[test]
+    fn test_node_id_from_address_tcp() {
+        let id = node_id_from_address("127.0.0.1:3001");
+        assert_eq!(id.0, "127.0.0.1:3001");
+    }
+
+    #[test]
+    fn test_node_id_from_address_spaces() {
+        let id = node_id_from_address("some address with spaces");
+        assert!(!id.0.contains(' '));
+    }
+
+    #[test]
+    fn test_slug_for_node_simple() {
+        assert_eq!(slug_for_node("MyNode"), "mynode");
+    }
+
+    #[test]
+    fn test_slug_for_node_special_chars() {
+        assert_eq!(slug_for_node("node-1_test"), "node-1_test");
+        // dots and slashes removed
+        assert_eq!(slug_for_node("node.1/test"), "node1test");
+    }
+
+    #[test]
+    fn test_slug_for_node_mixed() {
+        let slug = slug_for_node("Node@Host:3001");
+        assert_eq!(slug, "nodehost3001");
+    }
+
+    #[test]
+    fn test_multiple_nodes() {
+        let mut reg = NodeRegistry::new();
+        let id1 = NodeId("n1".to_string());
+        let id2 = NodeId("n2".to_string());
+        reg.register_node(id1.clone(), "node-a".to_string());
+        reg.register_node(id2.clone(), "node-b".to_string());
+        assert_eq!(reg.all_nodes().len(), 2);
+        reg.deregister_node(&id1);
+        assert_eq!(reg.all_nodes().len(), 1);
+    }
+}

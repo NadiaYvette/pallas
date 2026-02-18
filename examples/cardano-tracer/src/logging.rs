@@ -305,3 +305,211 @@ pub async fn run_rotation_loop(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LogFormat, LogMode, LoggingParams, RotationParams};
+
+    fn make_logging_params(dir: &std::path::Path, format: LogFormat) -> LoggingParams {
+        LoggingParams {
+            log_root: dir.to_path_buf(),
+            log_mode: LogMode::FileMode,
+            log_format: format,
+        }
+    }
+
+    #[test]
+    fn test_log_file_name_format() {
+        let name = log_file_name(&LogFormat::ForMachine);
+        assert!(name.starts_with("node-"));
+        assert!(name.ends_with(".json"));
+        // Should contain date separator
+        assert!(name.contains('T'));
+        // Length should be: "node-" (5) + "YYYY-MM-DDTHH-MM-SS" (19) + ".json" (5) = 29
+        assert_eq!(name.len(), 29);
+    }
+
+    #[test]
+    fn test_log_file_name_human() {
+        let name = log_file_name(&LogFormat::ForHuman);
+        assert!(name.starts_with("node-"));
+        assert!(name.ends_with(".log"));
+    }
+
+    #[test]
+    fn test_symlink_name_machine() {
+        assert_eq!(symlink_name(&LogFormat::ForMachine), "node.json");
+    }
+
+    #[test]
+    fn test_symlink_name_human() {
+        assert_eq!(symlink_name(&LogFormat::ForHuman), "node.log");
+    }
+
+    #[test]
+    fn test_log_extension() {
+        assert_eq!(log_extension(&LogFormat::ForMachine), ".json");
+        assert_eq!(log_extension(&LogFormat::ForHuman), ".log");
+    }
+
+    #[test]
+    fn test_initial_empty_line() {
+        // Critical: the Haskell stress test expects lineLength - 1 === numMsg,
+        // meaning the first line must be empty.
+        let dir = tempfile::tempdir().unwrap();
+        let lp = make_logging_params(dir.path(), LogFormat::ForMachine);
+        let mgr = LogManager::new(&[lp.clone()], None);
+
+        // Trigger file creation by writing 0 objects (forces handle creation path)
+        // Actually, write_trace_objects only creates handle when called, so we
+        // need to use create_log_file directly.
+        let handle = mgr.create_log_file("test-node", &lp).unwrap();
+
+        // Read the file and verify first line is empty.
+        let contents = std::fs::read_to_string(&handle.path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(!lines.is_empty());
+        assert_eq!(lines[0], "", "First line must be empty");
+    }
+
+    #[test]
+    fn test_symlink_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let lp = make_logging_params(dir.path(), LogFormat::ForMachine);
+        let mgr = LogManager::new(&[lp.clone()], None);
+
+        let _handle = mgr.create_log_file("test-node", &lp).unwrap();
+
+        let node_dir = dir.path().join("test-node");
+        let symlink = node_dir.join("node.json");
+        assert!(symlink.exists(), "Symlink must exist");
+        assert!(symlink.is_symlink(), "Must be a symlink");
+    }
+
+    #[test]
+    fn test_directory_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let lp = make_logging_params(dir.path(), LogFormat::ForMachine);
+        let mgr = LogManager::new(&[lp.clone()], None);
+
+        let node_dir = dir.path().join("new-node");
+        assert!(!node_dir.exists());
+
+        let _handle = mgr.create_log_file("new-node", &lp).unwrap();
+        assert!(node_dir.exists());
+        assert!(node_dir.is_dir());
+    }
+
+    #[test]
+    fn test_rotation_by_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let lp = make_logging_params(dir.path(), LogFormat::ForMachine);
+        let rotation = RotationParams {
+            frequency_secs: 1,
+            log_limit_bytes: 50, // very small limit
+            max_age_minutes: None,
+            max_age_hours: Some(24),
+            keep_files_num: 10,
+        };
+
+        let mut mgr = LogManager::new(&[lp.clone()], Some(rotation.clone()));
+
+        // Create initial file and write enough data to exceed limit.
+        let handle = mgr.create_log_file("rot-node", &lp).unwrap();
+        let initial_path = handle.path.clone();
+        mgr.handles.insert(
+            HandleKey {
+                node_name: "rot-node".to_string(),
+                params_idx: 0,
+            },
+            handle,
+        );
+
+        // Write data to exceed the limit.
+        {
+            let key = HandleKey {
+                node_name: "rot-node".to_string(),
+                params_idx: 0,
+            };
+            if let Some(h) = mgr.handles.get_mut(&key) {
+                for _ in 0..10 {
+                    writeln!(h.writer, "some log line that is reasonably long").unwrap();
+                }
+                h.writer.flush().unwrap();
+            }
+        }
+
+        // Small delay so the new file gets a different timestamp.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Trigger rotation check.
+        mgr.check_rotation(&rotation);
+
+        // The handle should now point to a different file.
+        let key = HandleKey {
+            node_name: "rot-node".to_string(),
+            params_idx: 0,
+        };
+        let new_handle = mgr.handles.get(&key).unwrap();
+        assert_ne!(
+            new_handle.path, initial_path,
+            "Rotation should create a new file"
+        );
+
+        // Both files should exist.
+        assert!(initial_path.exists(), "Old file should still exist");
+        assert!(new_handle.path.exists(), "New file should exist");
+
+        // Symlink should point to the new file.
+        let node_dir = dir.path().join("rot-node");
+        let symlink = node_dir.join("node.json");
+        let target = std::fs::read_link(&symlink).unwrap();
+        assert_eq!(
+            target.to_str().unwrap(),
+            new_handle.path.file_name().unwrap().to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_extract_timestamp_from_filename() {
+        let path = std::path::PathBuf::from("/logs/node-2024-01-15T14-30-00.json");
+        let ts = extract_timestamp_from_filename(&path, ".json").unwrap();
+        assert_eq!(ts.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-01-15 14:30:00");
+    }
+
+    #[test]
+    fn test_extract_timestamp_from_filename_invalid() {
+        let path = std::path::PathBuf::from("/logs/node-not-a-date.json");
+        assert!(extract_timestamp_from_filename(&path, ".json").is_none());
+    }
+
+    #[test]
+    fn test_multiple_logging_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine_dir = dir.path().join("machine-logs");
+        let human_dir = dir.path().join("human-logs");
+
+        let lp_machine = LoggingParams {
+            log_root: machine_dir.clone(),
+            log_mode: LogMode::FileMode,
+            log_format: LogFormat::ForMachine,
+        };
+        let lp_human = LoggingParams {
+            log_root: human_dir.clone(),
+            log_mode: LogMode::FileMode,
+            log_format: LogFormat::ForHuman,
+        };
+
+        let mgr = LogManager::new(&[lp_machine, lp_human], None);
+
+        // Create files for a node in both outputs.
+        let h1 = mgr.create_log_file("multi-node", &mgr.params[0].clone()).unwrap();
+        let h2 = mgr.create_log_file("multi-node", &mgr.params[1].clone()).unwrap();
+
+        assert!(h1.path.to_str().unwrap().ends_with(".json"));
+        assert!(h2.path.to_str().unwrap().ends_with(".log"));
+        assert!(machine_dir.join("multi-node").exists());
+        assert!(human_dir.join("multi-node").exists());
+    }
+}
