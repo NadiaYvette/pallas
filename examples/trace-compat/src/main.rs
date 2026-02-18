@@ -174,30 +174,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 res = rx.recv() => {
                     match res {
                         Some(obj) => {
-                             // Convert to JSON and write
-                            // Filter out dummy objects from String fallback
-                            if obj.to_namespace.contains(&"StringFallback".to_string()) {
-                                // info!("Skipping dummy object: {:?}", obj.to_human);
-                                continue;
-                            }
-
-                            // Convert AnyCbor to JSON Value
-                            let data_json = match decode_cbor_to_json(&mut pallas::codec::minicbor::Decoder::new(obj.to_machine.raw_bytes())) {
-                                Ok(v) => v,
-                                Err(_) => serde_json::Value::String(hex::encode(obj.to_machine.raw_bytes())),
+                            // to_machine is a CBOR-encoded text string containing the
+                            // complete JSON log line (as produced by trace-dispatcher).
+                            // Write it directly to match cardano-tracer's output format.
+                            let log_line = match decode_cbor_to_json(&mut pallas::codec::minicbor::Decoder::new(obj.to_machine.raw_bytes())) {
+                                Ok(serde_json::Value::String(s)) => {
+                                    // to_machine was a CBOR text string; the string
+                                    // itself is the JSON log line
+                                    s
+                                }
+                                Ok(v) => {
+                                    // to_machine decoded to a non-string JSON value;
+                                    // wrap it in a log object
+                                    let (ts_secs, ts_pico) = obj.timestamp.as_seconds_pico();
+                                    serde_json::json!({
+                                        "at": format!("{}.{:012}", ts_secs, ts_pico),
+                                        "ns": obj.to_namespace,
+                                        "sev": format!("{:?}", obj.severity),
+                                        "thread": obj.thread_id,
+                                        "host": obj.hostname,
+                                        "data": v
+                                    }).to_string()
+                                }
+                                Err(_) => {
+                                    // Fallback: hex-encode the raw CBOR
+                                    let (ts_secs, ts_pico) = obj.timestamp.as_seconds_pico();
+                                    serde_json::json!({
+                                        "at": format!("{}.{:012}", ts_secs, ts_pico),
+                                        "ns": obj.to_namespace,
+                                        "sev": format!("{:?}", obj.severity),
+                                        "thread": obj.thread_id,
+                                        "host": obj.hostname,
+                                        "data": hex::encode(obj.to_machine.raw_bytes())
+                                    }).to_string()
+                                }
                             };
 
-                            let (ts_secs, ts_pico) = obj.timestamp.as_seconds_pico();
-                            let json_obj = serde_json::json!({
-                                "at": format!("{}.{:012}", ts_secs, ts_pico),
-                                "ns": obj.to_namespace,
-                                "sev": format!("{:?}", obj.severity),
-                                "thread": obj.thread_id,
-                                "host": obj.hostname,
-                                "data": data_json
-                            });
-
-                            if let Err(e) = writeln!(writer, "{}", json_obj.to_string()) {
+                            if let Err(e) = writeln!(writer, "{}", log_line) {
                                 error!("Failed to write log: {:?}", e);
                             }
 
