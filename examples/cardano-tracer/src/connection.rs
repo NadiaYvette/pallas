@@ -41,7 +41,7 @@ impl Encode<()> for CustomRequest {
 
 impl<'b> Decode<'b, ()> for CustomRequest {
     fn decode(_d: &mut Decoder<'b>, _ctx: &mut ()) -> Result<Self, decode::Error> {
-        unimplemented!()
+        Err(decode::Error::message("CustomRequest decode not supported"))
     }
 }
 
@@ -64,14 +64,24 @@ pub async fn handle_connection(
     let _plexer_handle = plexer.spawn();
 
     // 1. Handshake (server side: receive proposed versions, accept one).
+    //
+    // Accept trace-forward ForwardingV_1 (1) and ForwardingV_2 (2) with the
+    // configured network magic, matching the Haskell cardano-tracer behavior.
+    // The handshake will refuse connections with mismatched magic or
+    // unsupported version numbers.
     let mut hs_server = handshake::Server::<n2c::VersionData>::new(hs_channel);
-    let versions = hs_server.receive_proposed_versions().await?;
-    info!("Node {:?}: handshake proposed {:?}", node_id, versions);
-    if let Some((v, data)) = versions.values.into_iter().next() {
-        hs_server.accept_version(v, data).await?;
-        info!("Node {:?}: accepted version {}", node_id, v);
-    } else {
-        return Err("No versions proposed".into());
+    let magic = config.network_magic as u64;
+    let supported = n2c::VersionTable {
+        values: [
+            (1, n2c::VersionData::new(magic, None)), // ForwardingV_1
+            (2, n2c::VersionData::new(magic, None)), // ForwardingV_2
+        ]
+        .into_iter()
+        .collect(),
+    };
+    match hs_server.handshake(supported).await? {
+        Some((v, _)) => info!("Node {:?}: accepted version {}", node_id, v),
+        None => return Err("Handshake refused: no compatible version or magic mismatch".into()),
     }
 
     // 2. Register node in registry (using address-derived name initially).
@@ -246,22 +256,33 @@ fn parse_ekg_metrics(raw: &[AnyCbor]) -> Vec<MetricEntry> {
                 let value = match idx {
                     0 => {
                         // Counter
-                        let v: i64 =
-                            pallas::codec::minicbor::decode(val_inner.raw_bytes()).unwrap_or(0);
-                        MetricValue::Counter(v)
+                        match pallas::codec::minicbor::decode(val_inner.raw_bytes()) {
+                            Ok(v) => MetricValue::Counter(v),
+                            Err(e) => {
+                                warn!("Failed to decode Counter value for {}: {:?}", name, e);
+                                MetricValue::Counter(0)
+                            }
+                        }
                     }
                     1 => {
                         // Gauge
-                        let v: i64 =
-                            pallas::codec::minicbor::decode(val_inner.raw_bytes()).unwrap_or(0);
-                        MetricValue::Gauge(v)
+                        match pallas::codec::minicbor::decode(val_inner.raw_bytes()) {
+                            Ok(v) => MetricValue::Gauge(v),
+                            Err(e) => {
+                                warn!("Failed to decode Gauge value for {}: {:?}", name, e);
+                                MetricValue::Gauge(0)
+                            }
+                        }
                     }
                     2 => {
                         // Label
-                        let v: String =
-                            pallas::codec::minicbor::decode(val_inner.raw_bytes())
-                                .unwrap_or_default();
-                        MetricValue::Label(v)
+                        match pallas::codec::minicbor::decode(val_inner.raw_bytes()) {
+                            Ok(v) => MetricValue::Label(v),
+                            Err(e) => {
+                                warn!("Failed to decode Label value for {}: {:?}", name, e);
+                                MetricValue::Label(String::new())
+                            }
+                        }
                     }
                     _ => continue,
                 };

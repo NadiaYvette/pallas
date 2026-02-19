@@ -15,7 +15,7 @@
 
 use pallas_codec::minicbor::{self, data::Type, decode, encode, Decode, Decoder, Encode, Encoder};
 use pallas_codec::utils::AnyCbor;
-use tracing::{error, info};
+use tracing::{debug, error};
 
 #[derive(Clone, Debug, PartialEq, Eq, Decode, Encode)]
 pub enum MetricValue {
@@ -129,12 +129,11 @@ impl<'b> Decode<'b, ()> for Message {
                 (0, 2) => Ok(Message::Req(d.decode()?)),
                 (1, 1) => Ok(Message::Done),
                 (1, 2) => {
-                    // Debugging payload
                     let dt = d.datatype()?;
-                    info!("EKG Resp payload type: {:?}", dt);
+                    debug!("EKG Resp payload type: {:?}", dt);
                     if dt == Type::U8 {
                         let val = d.u8()?;
-                        info!("EKG Resp payload is U8: {}", val);
+                        error!("EKG Resp: unexpected U8 payload: {}", val);
                         return Err(minicbor::decode::Error::message("Unexpected U8 payload"));
                     }
                     Ok(Message::Resp(d.decode()?))

@@ -151,13 +151,7 @@ where
             Ok(Some((msg, raw)))
         }
         Err(err) if err.is_end_of_input() => Ok(None),
-        Err(err) => {
-            if err.is_end_of_input() {
-                Ok(None)
-            } else {
-                Err(err.to_string())
-            }
-        }
+        Err(err) => Err(err.to_string()),
     }
 }
 

@@ -13,7 +13,7 @@
 //! See `System.Metrics.Protocol.Type` in the Haskell source for the protocol
 //! definition.
 
-use pallas_codec::minicbor::{decode, encode, Decode, Decoder, Encode, Encoder};
+use pallas_codec::minicbor::{data::Type, decode, encode, Decode, Decoder, Encode, Encoder};
 use pallas_codec::utils::AnyCbor;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +62,77 @@ impl Encode<()> for Message {
     }
 }
 
+/// Decode an indefinite-length byte string captured as AnyCbor.
+///
+/// The raw bytes start with 0x5f (indefinite byte string marker) followed by
+/// definite-length byte string chunks, terminated by a Break (0xff).
+fn decode_indefinite_bytes_from_any(any: &AnyCbor) -> Result<Vec<u8>, decode::Error> {
+    let cbor_slice = any.raw_bytes();
+
+    if cbor_slice.is_empty() || cbor_slice[0] != 0x5f {
+        return Err(decode::Error::message(
+            "expected indefinite byte string start",
+        ));
+    }
+
+    let mut sub_d = Decoder::new(&cbor_slice[1..]);
+    let mut bytes = Vec::new();
+    while sub_d.datatype()? != Type::Break {
+        let chunk = sub_d.bytes()?;
+        bytes.extend_from_slice(chunk);
+    }
+
+    Ok(bytes)
+}
+
+/// Decode a datapoint value from inside a value-wrapper array of known length.
+fn decode_value_wrapper(
+    d: &mut Decoder<'_>,
+    val_arr_len: Option<u64>,
+) -> Result<Option<Vec<u8>>, decode::Error> {
+    match val_arr_len {
+        Some(0) => Ok(None),
+        Some(1) => {
+            let dt = d.datatype()?;
+            if dt == Type::BytesIndef {
+                let any: AnyCbor = d.decode()?;
+                Ok(Some(decode_indefinite_bytes_from_any(&any)?))
+            } else {
+                Ok(Some(d.decode()?))
+            }
+        }
+        None => {
+            // Indefinite length wrapper array
+            if d.datatype()? == Type::Break {
+                d.skip()?;
+                Ok(None)
+            } else {
+                let v = if d.datatype()? == Type::BytesIndef {
+                    d.skip()?;
+                    let mut bytes = Vec::new();
+                    while d.datatype()? != Type::Break {
+                        let chunk: &[u8] = d.bytes()?;
+                        bytes.extend_from_slice(chunk);
+                    }
+                    d.skip()?;
+                    bytes
+                } else {
+                    d.decode()?
+                };
+                // Expect break to close the indefinite wrapper array
+                if d.datatype()? != Type::Break {
+                    return Err(decode::Error::message(
+                        "expected break after indefinite value wrapper item",
+                    ));
+                }
+                d.skip()?;
+                Ok(Some(v))
+            }
+        }
+        _ => Err(decode::Error::message("invalid value wrapper length")),
+    }
+}
+
 impl<'b> Decode<'b, ()> for Message {
     fn decode(d: &mut Decoder<'b>, _ctx: &mut ()) -> Result<Self, decode::Error> {
         d.array()?;
@@ -78,76 +149,7 @@ impl<'b> Decode<'b, ()> for Message {
                             d.array()?;
                             let name: String = d.decode()?;
                             let val_arr_len = d.array()?;
-                            let val = match val_arr_len {
-                                Some(0) => None,
-                                Some(1) => {
-                                    // Check if next is indefinite bytes (0x5f)
-                                    let dt = d.datatype()?;
-                                    if dt == pallas_codec::minicbor::data::Type::BytesIndef {
-                                        // Use AnyCbor to capture the raw bytes of the indefinite byte string
-                                        let any: AnyCbor = d.decode()?;
-                                        let cbor_slice = any.raw_bytes();
-
-                                        // Manually decode the content.
-                                        // We skip the first byte (0x5f) and create a new decoder for the rest.
-                                        if cbor_slice.is_empty() || cbor_slice[0] != 0x5f {
-                                            return Err(decode::Error::message(
-                                                "expected indefinite byte string start",
-                                            ));
-                                        }
-
-                                        let mut sub_d = Decoder::new(&cbor_slice[1..]);
-                                        let mut bytes = Vec::new();
-                                        while sub_d.datatype()?
-                                            != pallas_codec::minicbor::data::Type::Break
-                                        {
-                                            let chunk = sub_d.bytes()?;
-                                            bytes.extend_from_slice(chunk);
-                                        }
-
-                                        Some(bytes)
-                                    } else {
-                                        Some(d.decode()?)
-                                    }
-                                }
-                                None => {
-                                    // Indefinite length wrapper array
-                                    if d.datatype()? == pallas_codec::minicbor::data::Type::Break {
-                                        d.skip()?;
-                                        None
-                                    } else {
-                                        let v = if d.datatype()?
-                                            == pallas_codec::minicbor::data::Type::BytesIndef
-                                        {
-                                            d.skip()?;
-                                            let mut bytes = Vec::new();
-                                            while d.datatype()?
-                                                != pallas_codec::minicbor::data::Type::Break
-                                            {
-                                                let chunk: &[u8] = d.bytes()?;
-                                                bytes.extend_from_slice(chunk);
-                                            }
-                                            d.skip()?;
-                                            bytes
-                                        } else {
-                                            d.decode()?
-                                        };
-                                        // Expect break
-                                        if d.datatype()?
-                                            != pallas_codec::minicbor::data::Type::Break
-                                        {
-                                            return Err(decode::Error::message("expected break after indefinite value wrapper item"));
-                                        }
-                                        d.skip()?;
-                                        Some(v)
-                                    }
-                                }
-                                _ => {
-                                    return Err(decode::Error::message(
-                                        "invalid value wrapper length",
-                                    ))
-                                }
-                            };
+                            let val = decode_value_wrapper(d, val_arr_len)?;
                             values.push((name, val));
                         }
                     }
@@ -155,50 +157,13 @@ impl<'b> Decode<'b, ()> for Message {
                         // Indefinite length list of pairs
                         loop {
                             let dt = d.datatype()?;
-                            if dt == pallas_codec::minicbor::data::Type::Break {
+                            if dt == Type::Break {
                                 break;
                             }
                             d.array()?;
                             let name: String = d.decode()?;
                             let val_arr_len = d.array()?;
-                            let val = match val_arr_len {
-                                Some(0) => None,
-                                Some(1) => {
-                                    // Check if next is indefinite bytes (0x5f)
-                                    let dt = d.datatype()?;
-                                    if dt == pallas_codec::minicbor::data::Type::BytesIndef {
-                                        // Use AnyCbor to capture the raw bytes of the indefinite byte string
-                                        let any: AnyCbor = d.decode()?;
-                                        let cbor_slice = any.raw_bytes();
-
-                                        // Manually decode the content.
-                                        // We skip the first byte (0x5f) and create a new decoder for the rest.
-                                        if cbor_slice.is_empty() || cbor_slice[0] != 0x5f {
-                                            return Err(decode::Error::message(
-                                                "expected indefinite byte string start",
-                                            ));
-                                        }
-
-                                        let mut sub_d = Decoder::new(&cbor_slice[1..]);
-                                        let mut bytes = Vec::new();
-                                        while sub_d.datatype()?
-                                            != pallas_codec::minicbor::data::Type::Break
-                                        {
-                                            let chunk = sub_d.bytes()?;
-                                            bytes.extend_from_slice(chunk);
-                                        }
-
-                                        Some(bytes)
-                                    } else {
-                                        Some(d.decode()?)
-                                    }
-                                }
-                                _ => {
-                                    return Err(decode::Error::message(
-                                        "invalid value wrapper length or indefinite wrapper",
-                                    ))
-                                }
-                            };
+                            let val = decode_value_wrapper(d, val_arr_len)?;
                             values.push((name, val));
                         }
                         d.skip()?; // Skip the Break

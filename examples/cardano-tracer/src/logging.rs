@@ -68,7 +68,7 @@ impl LogManager {
 
     /// Write a batch of trace objects to all configured log outputs for a node.
     pub fn write_trace_objects(&mut self, node_name: &str, objects: &[TraceObject]) {
-        for (idx, lp) in self.params.clone().iter().enumerate() {
+        for (idx, lp) in self.params.iter().enumerate() {
             if lp.log_mode == LogMode::JournalMode {
                 // JournalMode not yet implemented; skip.
                 continue;
@@ -234,8 +234,9 @@ fn cleanup_old_logs(
     }
 
     // Check all files except the newest one (current log).
+    let mut remaining = total;
     for path in &log_files[..total - 1] {
-        if log_files.len() <= keep_num as usize {
+        if remaining <= keep_num as usize {
             break;
         }
 
@@ -244,6 +245,8 @@ fn cleanup_old_logs(
             if now - ts > max_age {
                 if let Err(e) = fs::remove_file(path) {
                     error!("Failed to delete old log {:?}: {:?}", path, e);
+                } else {
+                    remaining -= 1;
                 }
             }
         }
@@ -265,6 +268,7 @@ fn extract_timestamp_from_filename(
 }
 
 /// Atomically update a symlink to point to a new target file.
+#[cfg(unix)]
 fn update_symlink_atomically(
     dir: &Path,
     target_name: &str,
@@ -277,12 +281,21 @@ fn update_symlink_atomically(
     let _ = fs::remove_file(&tmp_path);
 
     // Create temp symlink -> target.
-    #[cfg(unix)]
     std::os::unix::fs::symlink(target_name, &tmp_path)?;
 
     // Atomically rename temp -> actual link.
     fs::rename(&tmp_path, &link_path)?;
 
+    Ok(())
+}
+
+/// Stub for non-Unix platforms where symlinks are not supported.
+#[cfg(not(unix))]
+fn update_symlink_atomically(
+    _dir: &Path,
+    _target_name: &str,
+    _link_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 

@@ -169,40 +169,32 @@ fn decode_maybe<'b, T, C>(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Option<T>,
 where
     T: Decode<'b, C>,
 {
-    // Try to read null
-    if d.datatype()? == Type::Null {
-        d.null()?;
-        return Ok(None);
-    }
+    let dt = d.datatype()?;
 
-    // Try to read 0 (integer) as None
-    if d.datatype()? == Type::U8
-        || d.datatype()? == Type::U16
-        || d.datatype()? == Type::U32
-        || d.datatype()? == Type::U64
-    {
-        let val = d.u64()?;
-        if val == 0 {
-            return Ok(None);
+    match dt {
+        // Null → Nothing
+        Type::Null => {
+            d.null()?;
+            Ok(None)
         }
-    }
-
-    // Try to read array
-    if d.datatype()? == Type::Array || d.datatype()? == Type::ArrayIndef {
-        let len = d.array()?;
-        match len {
-            Some(0) => Ok(None),
-            Some(1) => {
-                let val = d.decode_with(ctx)?;
-                Ok(Some(val))
+        // Array → Haskell Maybe encoding: [] = Nothing, [x] = Just x
+        Type::Array | Type::ArrayIndef => {
+            let len = d.array()?;
+            match len {
+                Some(0) => Ok(None),
+                Some(1) => {
+                    let val = d.decode_with(ctx)?;
+                    Ok(Some(val))
+                }
+                _ => Err(decode::Error::message("invalid maybe array length")),
             }
-            _ => Err(decode::Error::message("invalid maybe array length")),
         }
-    } else {
-        // Assume it is the value itself (permissive decoding for TraceObject
-        // compatibility)
-        let val = d.decode_with(ctx)?;
-        Ok(Some(val))
+        // Anything else → treat as the value itself (permissive decoding for
+        // TraceObject compatibility)
+        _ => {
+            let val = d.decode_with(ctx)?;
+            Ok(Some(val))
+        }
     }
 }
 

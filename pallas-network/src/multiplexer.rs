@@ -335,6 +335,11 @@ impl Muxer {
     }
 
     async fn write_segment(&mut self, protocol: u16, payload: &[u8]) -> Result<(), std::io::Error> {
+        debug_assert!(
+            payload.len() <= u16::MAX as usize,
+            "segment payload length {} exceeds u16::MAX",
+            payload.len()
+        );
         let header = Header {
             protocol,
             timestamp: self.1.elapsed().as_micros() as u32,
@@ -373,9 +378,12 @@ impl Muxer {
     pub async fn tick(&mut self) -> Result<(), Error> {
         let msg = self.2 .1.recv().await;
 
-        if let Some(x) = msg {
-            trace!(protocol = x.0, "mux happening");
-            self.mux(x).await?
+        match msg {
+            Some(x) => {
+                trace!(protocol = x.0, "mux happening");
+                self.mux(x).await?;
+            }
+            None => return Err(Error::PlexerMux),
         }
 
         Ok(())
