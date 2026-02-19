@@ -90,22 +90,26 @@ pub async fn handle_connection(
         reg.register_node(node_id.clone(), node_id.0.clone());
     }
 
-    // 3. Spawn EKG metrics handler.
-    let ekg_registry = registry.clone();
-    let ekg_node_id = node_id.clone();
-    let ekg_freq = config.ekg_freq_secs();
-    let ekg_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        run_ekg_handler(ekg_channel, ekg_node_id, ekg_registry, ekg_freq, ekg_shutdown).await;
-    });
+    // 3. Spawn EKG metrics handler (tracked for cleanup).
+    let ekg_handle = {
+        let ekg_registry = registry.clone();
+        let ekg_node_id = node_id.clone();
+        let ekg_freq = config.ekg_freq_secs();
+        let ekg_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            run_ekg_handler(ekg_channel, ekg_node_id, ekg_registry, ekg_freq, ekg_shutdown).await;
+        })
+    };
 
-    // 4. Spawn Datapoints handler.
-    let dp_registry = registry.clone();
-    let dp_node_id = node_id.clone();
-    let dp_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        run_datapoints_handler(dp_channel, dp_node_id, dp_registry, dp_shutdown).await;
-    });
+    // 4. Spawn Datapoints handler (tracked for cleanup).
+    let dp_handle = {
+        let dp_registry = registry.clone();
+        let dp_node_id = node_id.clone();
+        let dp_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            run_datapoints_handler(dp_channel, dp_node_id, dp_registry, dp_shutdown).await;
+        })
+    };
 
     // 5. Run TraceObjects loop (main connection loop).
     let result = run_trace_objects_loop(
@@ -118,7 +122,11 @@ pub async fn handle_connection(
     )
     .await;
 
-    // 6. Deregister node on disconnect.
+    // 6. Abort subsidiary protocol tasks on disconnect.
+    ekg_handle.abort();
+    dp_handle.abort();
+
+    // 7. Deregister node on disconnect.
     {
         let mut reg = registry.write().await;
         reg.deregister_node(&node_id);

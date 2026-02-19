@@ -1,6 +1,6 @@
 use crate::cbor_json;
-use crate::config::{LogFormat, LogMode, LoggingParams, RotationParams};
-use pallas::network::miniprotocols::traceobjects::TraceObject;
+use crate::config::{LogFormat, LogMode, LoggingParams, RotationParams, Verbosity};
+use pallas::network::miniprotocols::traceobjects::{Severity, TraceObject};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -52,22 +52,51 @@ struct LogHandle {
 pub struct LogManager {
     params: Vec<LoggingParams>,
     rotation: Option<RotationParams>,
+    verbosity: Option<Verbosity>,
     handles: HashMap<HandleKey, LogHandle>,
 }
 
 pub type SharedLogManager = Arc<Mutex<LogManager>>;
 
+/// Convert a TraceObject severity to its numeric index for filtering.
+fn severity_index(severity: &Severity) -> u8 {
+    match severity {
+        Severity::Debug => 0,
+        Severity::Info => 1,
+        Severity::Notice => 2,
+        Severity::Warning => 3,
+        Severity::Error => 4,
+        Severity::Critical => 5,
+        Severity::Alert => 6,
+        Severity::Emergency => 7,
+    }
+}
+
 impl LogManager {
-    pub fn new(params: &[LoggingParams], rotation: Option<RotationParams>) -> Self {
+    pub fn new(
+        params: &[LoggingParams],
+        rotation: Option<RotationParams>,
+        verbosity: Option<Verbosity>,
+    ) -> Self {
         LogManager {
             params: params.to_vec(),
             rotation,
+            verbosity,
             handles: HashMap::new(),
         }
     }
 
     /// Write a batch of trace objects to all configured log outputs for a node.
+    ///
+    /// Objects are filtered by the configured verbosity level before writing.
     pub fn write_trace_objects(&mut self, node_name: &str, objects: &[TraceObject]) {
+        // Determine minimum severity threshold from verbosity config.
+        let min_sev = self
+            .verbosity
+            .as_ref()
+            .map(|v| v.min_severity_index())
+            .unwrap_or(0); // Default: log everything
+
         for (idx, lp) in self.params.iter().enumerate() {
             if lp.log_mode == LogMode::JournalMode {
                 // JournalMode not yet implemented; skip.
@@ -94,6 +123,9 @@ impl LogManager {
 
             if let Some(handle) = self.handles.get_mut(&key) {
                 for obj in objects {
+                    if severity_index(&obj.severity) < min_sev {
+                        continue;
+                    }
                     let line = match lp.log_format {
                         LogFormat::ForMachine => cbor_json::trace_object_to_log_line(obj),
                         LogFormat::ForHuman => cbor_json::trace_object_to_human_line(obj),
@@ -372,7 +404,7 @@ mod tests {
         // meaning the first line must be empty.
         let dir = tempfile::tempdir().unwrap();
         let lp = make_logging_params(dir.path(), LogFormat::ForMachine);
-        let mgr = LogManager::new(&[lp.clone()], None);
+        let mgr = LogManager::new(&[lp.clone()], None, None);
 
         // Trigger file creation by writing 0 objects (forces handle creation path)
         // Actually, write_trace_objects only creates handle when called, so we
@@ -390,7 +422,7 @@ mod tests {
     fn test_symlink_creation() {
         let dir = tempfile::tempdir().unwrap();
         let lp = make_logging_params(dir.path(), LogFormat::ForMachine);
-        let mgr = LogManager::new(&[lp.clone()], None);
+        let mgr = LogManager::new(&[lp.clone()], None, None);
 
         let _handle = mgr.create_log_file("test-node", &lp).unwrap();
 
@@ -404,7 +436,7 @@ mod tests {
     fn test_directory_creation() {
         let dir = tempfile::tempdir().unwrap();
         let lp = make_logging_params(dir.path(), LogFormat::ForMachine);
-        let mgr = LogManager::new(&[lp.clone()], None);
+        let mgr = LogManager::new(&[lp.clone()], None, None);
 
         let node_dir = dir.path().join("new-node");
         assert!(!node_dir.exists());
@@ -426,7 +458,7 @@ mod tests {
             keep_files_num: 10,
         };
 
-        let mut mgr = LogManager::new(&[lp.clone()], Some(rotation.clone()));
+        let mut mgr = LogManager::new(&[lp.clone()], Some(rotation.clone()), None);
 
         // Create initial file and write enough data to exceed limit.
         let handle = mgr.create_log_file("rot-node", &lp).unwrap();
@@ -514,7 +546,7 @@ mod tests {
             log_format: LogFormat::ForHuman,
         };
 
-        let mgr = LogManager::new(&[lp_machine, lp_human], None);
+        let mgr = LogManager::new(&[lp_machine, lp_human], None, None);
 
         // Create files for a node in both outputs.
         let h1 = mgr.create_log_file("multi-node", &mgr.params[0].clone()).unwrap();

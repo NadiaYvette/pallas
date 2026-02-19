@@ -1,5 +1,5 @@
 use clap::Parser;
-use pallas::codec::minicbor::{encode, Encode, Encoder};
+use pallas::codec::minicbor::{self, encode, Encode, Encoder};
 use pallas::network::miniprotocols::handshake::n2c;
 use pallas::network::{
     miniprotocols::{
@@ -210,9 +210,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             info!("TraceObjects: Req blocking={}, n={}", blocking, n);
                             // Dummy response
                             let timestamp = traceobjects::TraceTimestamp::Tag1 { day: 0, pico: 0 };
+                            let to_machine_bytes = {
+                                let mut buf = Vec::new();
+                                minicbor::encode("{}", &mut buf).unwrap();
+                                buf
+                            };
                             let obj = traceobjects::TraceObject {
+                                kind: None,
                                 to_human: Some("Dummy Trace from Rust".to_string()),
-                                to_machine: "{}".to_string(),
+                                to_machine: minicbor::decode(&to_machine_bytes).unwrap(),
                                 to_namespace: vec!["Rust".to_string(), "Trace".to_string()],
                                 severity: traceobjects::Severity::Info,
                                 detail: traceobjects::Detail::Normal,
@@ -237,11 +243,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     match server.recv_request().await {
                         Ok(Some(req)) => {
-                            let mut points = vec![];
                             info!("EKG: Req {:?}", req);
-                            // let metrics = vec![("rust.metric".to_string(),
-                            // ekgmetrics::MetricValue::Gauge(42))];
-                            info!("EKG: Responding with {:?}", points);
+                            let points = vec![];
                             server.send_response(points).await.ok();
                         }
                         Ok(None) => break,
@@ -372,9 +375,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     match client.recv_response().await {
                         Ok(metrics) => {
-                            info!("EKG: Received {} metrics", metrics.len());
-                            for (name, val) in metrics {
-                                info!("  - {}: {:?}", name, val);
+                            info!("EKG: Received {} raw items", metrics.len());
+                            for (i, item) in metrics.iter().enumerate() {
+                                info!("  [{}]: {} bytes", i, item.raw_bytes().len());
                             }
                         }
                         Err(e) => {

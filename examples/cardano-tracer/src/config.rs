@@ -178,6 +178,19 @@ pub enum Verbosity {
     Maximum,
 }
 
+impl Verbosity {
+    /// Returns the minimum severity level (as a numeric index) that should be
+    /// logged. Severity indices match the TraceObjects Severity enum:
+    /// 0=Debug, 1=Info, 2=Notice, 3=Warning, 4=Error, 5=Critical, 6=Alert, 7=Emergency.
+    pub fn min_severity_index(&self) -> u8 {
+        match self {
+            Verbosity::Maximum => 0,    // Debug and above
+            Verbosity::Minimum => 3,    // Warning and above
+            Verbosity::ErrorsOnly => 4, // Error and above
+        }
+    }
+}
+
 /// Load and parse a tracer configuration from a YAML file.
 pub fn load_config(path: &Path) -> Result<TracerConfig, Box<dyn std::error::Error>> {
     let f = std::fs::File::open(path)?;

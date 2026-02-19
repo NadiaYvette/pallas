@@ -1,4 +1,4 @@
-use pallas::codec::minicbor::{self, Decode};
+use pallas::codec::minicbor;
 use pallas::network::{
     miniprotocols::handshake::n2c,
     miniprotocols::{
@@ -175,9 +175,15 @@ async fn test_client_mode_polling() {
     assert_eq!(n, 10);
 
     // Send dummy response
+    let to_machine_bytes = {
+        let mut buf = Vec::new();
+        minicbor::encode("{}", &mut buf).unwrap();
+        buf
+    };
     let obj = traceobjects::TraceObject {
+        kind: None,
         to_human: Some("Test Trace".to_string()),
-        to_machine: "{}".to_string(),
+        to_machine: minicbor::decode(&to_machine_bytes).unwrap(),
         to_namespace: vec!["Test".to_string()],
         severity: traceobjects::Severity::Info,
         detail: traceobjects::Detail::Normal,

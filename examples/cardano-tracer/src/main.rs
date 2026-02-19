@@ -45,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_manager: SharedLogManager = Arc::new(tokio::sync::Mutex::new(LogManager::new(
         &config.logging,
         config.rotation.clone(),
+        config.verbosity.clone(),
     )));
 
     let shutdown = CancellationToken::new();

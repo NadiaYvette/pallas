@@ -13,16 +13,12 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use tokio::net::UnixListener;
-// use std::sync::atomic::AtomicUsize;
-// use std::sync::Arc;
 use pallas::codec::minicbor::{self, decode, Decode, Decoder, Encode, Encoder};
 use pallas::codec::minicbor::data::Type;
 use pallas::network::miniprotocols::traceobjects::{Message, TraceObject};
 use pallas::network::multiplexer::ChannelBuffer;
 use tokio::sync::mpsc;
 use tracing::{error, info};
-
-// static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Parser)]
 struct Args {
@@ -69,7 +65,7 @@ impl Encode<()> for CustomRequest {
 
 impl<'b> Decode<'b, ()> for CustomRequest {
     fn decode(_d: &mut Decoder<'b>, _ctx: &mut ()) -> Result<Self, decode::Error> {
-        unimplemented!()
+        Err(decode::Error::message("CustomRequest decode not supported"))
     }
 }
 
@@ -119,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ekg_path = subdir.join("ekg.json");
         let dp_path = subdir.join("datapoints.json");
 
-        let mut file = match std::fs::OpenOptions::new()
+        let file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&file_path)
@@ -131,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        let mut ekg_file = match std::fs::OpenOptions::new()
+        let ekg_file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&ekg_path)
@@ -143,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        let mut dp_file = match std::fs::OpenOptions::new()
+        let dp_file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&dp_path)

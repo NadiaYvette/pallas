@@ -10,6 +10,7 @@ use pallas::network::{
 };
 use std::path::PathBuf;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -38,17 +39,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = UnixListener::bind(&args.node_socket)?;
     info!("Proxy listening on {:?}", args.node_socket);
 
-    loop {
-        let (node_stream, _) = listener.accept().await?;
-        info!("Node connected");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let tracer_socket = args.tracer_socket.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_proxy(node_stream, tracer_socket).await {
-                error!("Proxy error: {:?}", e);
+    // Signal handler for graceful shutdown.
+    tokio::spawn(async move {
+        let mut sig_term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        let mut sig_int =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+        tokio::select! {
+            _ = sig_term.recv() => info!("Received SIGTERM"),
+            _ = sig_int.recv() => info!("Received SIGINT"),
+        }
+        let _ = shutdown_tx.send(true);
+    });
+
+    loop {
+        let mut shutdown = shutdown_rx.clone();
+        tokio::select! {
+            accept_res = listener.accept() => {
+                match accept_res {
+                    Ok((node_stream, _)) => {
+                        info!("Node connected");
+                        let tracer_socket = args.tracer_socket.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_proxy(node_stream, tracer_socket).await {
+                                error!("Proxy error: {:?}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Accept error: {:?}", e);
+                    }
+                }
             }
-        });
+            _ = shutdown.changed() => {
+                info!("Proxy shutting down");
+                break;
+            }
+        }
     }
+
+    Ok(())
 }
 
 async fn connect_with_retry(socket: &PathBuf) -> Result<UnixStream, Box<dyn std::error::Error>> {
@@ -99,6 +131,8 @@ async fn handle_proxy(
     let _node_handle = node_plexer.spawn();
     let _tracer_handle = tracer_plexer.spawn();
 
+    let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     for (_i, p) in protocols.iter().enumerate() {
         if node_channels.is_empty() || tracer_channels.is_empty() {
             break;
@@ -111,15 +145,23 @@ async fn handle_proxy(
 
         if *p == PROTOCOL_TFWP_TRACE_OBJECTS {
             // Decode and re-encode TraceObjects to exercise protocol support
-            tokio::spawn(bridge_trace_objects(node_rx, tracer_tx, "Node->Tracer"));
-            tokio::spawn(bridge_trace_objects(tracer_rx, node_tx, "Tracer->Node"));
+            handles.push(tokio::spawn(bridge_trace_objects(node_rx, tracer_tx, "Node->Tracer")));
+            handles.push(tokio::spawn(bridge_trace_objects(tracer_rx, node_tx, "Tracer->Node")));
         } else {
             let p_label = format!("Protocol {}", p);
-            tokio::spawn(forward_raw(node_rx, tracer_tx, p_label.clone()));
-            tokio::spawn(forward_raw(tracer_rx, node_tx, p_label));
+            handles.push(tokio::spawn(forward_raw(node_rx, tracer_tx, p_label.clone())));
+            handles.push(tokio::spawn(forward_raw(tracer_rx, node_tx, p_label)));
         }
     }
 
+    // Wait for all bridge tasks to complete (connection closed on either side).
+    for handle in handles {
+        if let Err(e) = handle.await {
+            error!("Bridge task failed: {:?}", e);
+        }
+    }
+
+    info!("Proxy session ended");
     Ok(())
 }
 
