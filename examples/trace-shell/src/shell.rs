@@ -42,6 +42,7 @@ fn history_path() -> PathBuf {
 pub async fn run_shell_with_autoconnect(
     state: SharedState,
     auto_connect_args: Option<Vec<String>>,
+    logdir: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = ConnectionState::Disconnected;
     let mut auto_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -89,10 +90,18 @@ pub async fn run_shell_with_autoconnect(
                         handle_connect(&tokens[1..], &state, &mut connection).await;
                     }
                     "disconnect" => {
-                        handle_disconnect(&mut connection, &mut auto_handle).await;
+                        if tokens.get(1).map(|s| s.as_str()) == Some("help") {
+                            print_help_disconnect();
+                        } else {
+                            handle_disconnect(&mut connection, &mut auto_handle).await;
+                        }
                     }
                     "status" => {
-                        handle_status(&connection, &state).await;
+                        if tokens.get(1).map(|s| s.as_str()) == Some("help") {
+                            print_help_status();
+                        } else {
+                            handle_status(&connection, &state, logdir.as_deref()).await;
+                        }
                     }
                     "trace" => {
                         handle_trace(&tokens[1..], &state, &mut auto_handle).await;
@@ -193,9 +202,9 @@ const TOP_COMMANDS: &[&str] = &[
     "status",
     "trace",
 ];
-const TRACE_SUBS: &[&str] = &["add", "auto", "clear", "list"];
-const METRIC_SUBS: &[&str] = &["clear", "del", "get", "incr", "list", "set"];
-const DP_SUBS: &[&str] = &["clear", "del", "get", "list", "nodeinfo", "set"];
+const TRACE_SUBS: &[&str] = &["add", "auto", "clear", "help", "list"];
+const METRIC_SUBS: &[&str] = &["clear", "del", "get", "help", "incr", "list", "set"];
+const DP_SUBS: &[&str] = &["clear", "del", "get", "help", "list", "nodeinfo", "set"];
 const HELP_TOPICS: &[&str] = &[
     "connect",
     "datapoint",
@@ -388,7 +397,12 @@ async fn handle_connect(
     if args.is_empty() {
         println!("Usage: connect <socket-path | tcp:host:port> [--magic N]");
         println!();
-        println!("Type 'help connect' for details.");
+        println!("Type 'help connect' or 'connect help' for details.");
+        return;
+    }
+
+    if args[0].to_lowercase() == "help" {
+        print_help_connect();
         return;
     }
 
@@ -487,7 +501,7 @@ async fn handle_disconnect(
     }
 }
 
-async fn handle_status(connection: &ConnectionState, state: &SharedState) {
+async fn handle_status(connection: &ConnectionState, state: &SharedState, logdir: Option<&str>) {
     match connection {
         ConnectionState::Connected { address, .. } => {
             println!("Connected to: {}", address);
@@ -503,6 +517,65 @@ async fn handle_status(connection: &ConnectionState, state: &SharedState) {
     println!("EKG polls:       {}", s.ekg_polls);
     println!("Datapoints:      {}", s.datapoints.len());
     println!("DP polls:        {}", s.dp_polls);
+
+    if let Some(dir) = logdir {
+        println!();
+        println!("Log directory:   {}", dir);
+        let path = std::path::Path::new(dir);
+        if !path.exists() {
+            println!("  (directory does not exist yet)");
+        } else {
+            match list_log_files(path) {
+                files if files.is_empty() => {
+                    println!("  (no log files yet — send some trace objects first)");
+                }
+                files => {
+                    for (rel_path, size) in &files {
+                        println!("  {} ({} bytes)", rel_path, size);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Scan a log directory tree for node-*.json / node-*.log files.
+fn list_log_files(root: &std::path::Path) -> Vec<(String, u64)> {
+    let mut results = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return results,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Look for log files inside node subdirectories
+            if let Ok(sub) = std::fs::read_dir(&path) {
+                for sub_entry in sub.flatten() {
+                    let sub_path = sub_entry.path();
+                    if let Some(name) = sub_path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("node-") && (name.ends_with(".json") || name.ends_with(".log")) {
+                            let size = sub_path.metadata().map(|m| m.len()).unwrap_or(0);
+                            let rel = format!(
+                                "{}/{}",
+                                path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                                name
+                            );
+                            results.push((rel, size));
+                        }
+                    }
+                }
+            }
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            // Log files directly in root (less common)
+            if name.starts_with("node-") && (name.ends_with(".json") || name.ends_with(".log")) {
+                let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+                results.push((name.to_string(), size));
+            }
+        }
+    }
+    results.sort();
+    results
 }
 
 // ---------------------------------------------------------------------------
@@ -515,9 +588,9 @@ async fn handle_trace(
     auto_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
     if args.is_empty() {
-        println!("Usage: trace <add|list|clear|auto> [args...]");
+        println!("Usage: trace <add|list|clear|auto|help> [args...]");
         println!();
-        println!("Type 'help trace' for details.");
+        println!("Type 'help trace' or 'trace help' for details.");
         return;
     }
 
@@ -526,9 +599,10 @@ async fn handle_trace(
         "list" => trace_list(state).await,
         "clear" => trace_clear(state).await,
         "auto" => trace_auto(&args[1..], state, auto_handle).await,
+        "help" => print_help_trace(),
         other => {
             println!(
-                "Unknown trace subcommand: '{}'. Expected: add, list, clear, auto.",
+                "Unknown trace subcommand: '{}'. Expected: add, list, clear, auto, help.",
                 other
             );
         }
@@ -539,7 +613,7 @@ async fn trace_add(args: &[String], state: &SharedState) {
     if args.is_empty() {
         println!("Usage: trace add <message> [--severity S] [--detail D] [--ns A.B.C] [--hostname H] [--thread T]");
         println!();
-        println!("Type 'help trace' for details.");
+        println!("Type 'help trace' or 'trace help' for details.");
         return;
     }
 
@@ -637,7 +711,7 @@ async fn trace_auto(
         println!("Usage: trace auto <interval-ms> [--prefix P]");
         println!("       trace auto stop");
         println!();
-        println!("Type 'help trace' for details.");
+        println!("Type 'help trace' or 'trace help' for details.");
         return;
     }
 
@@ -709,9 +783,9 @@ async fn trace_auto(
 
 async fn handle_metric(args: &[String], state: &SharedState) {
     if args.is_empty() {
-        println!("Usage: metric <set|get|list|del|clear|incr> [args...]");
+        println!("Usage: metric <set|get|list|del|clear|incr|help> [args...]");
         println!();
-        println!("Type 'help metric' for details.");
+        println!("Type 'help metric' or 'metric help' for details.");
         return;
     }
 
@@ -722,9 +796,10 @@ async fn handle_metric(args: &[String], state: &SharedState) {
         "del" | "delete" | "rm" => metric_del(&args[1..], state).await,
         "clear" => metric_clear(state).await,
         "incr" | "increment" => metric_incr(&args[1..], state).await,
+        "help" => print_help_metric(),
         other => {
             println!(
-                "Unknown metric subcommand: '{}'. Expected: set, get, list, del, clear, incr.",
+                "Unknown metric subcommand: '{}'. Expected: set, get, list, del, clear, incr, help.",
                 other
             );
         }
@@ -854,9 +929,9 @@ async fn metric_incr(args: &[String], state: &SharedState) {
 
 async fn handle_datapoint(args: &[String], state: &SharedState) {
     if args.is_empty() {
-        println!("Usage: datapoint <set|get|list|del|clear|nodeinfo> [args...]");
+        println!("Usage: datapoint <set|get|list|del|clear|nodeinfo|help> [args...]");
         println!();
-        println!("Type 'help datapoint' for details.");
+        println!("Type 'help datapoint' or 'datapoint help' for details.");
         return;
     }
 
@@ -867,9 +942,10 @@ async fn handle_datapoint(args: &[String], state: &SharedState) {
         "del" | "delete" | "rm" => datapoint_del(&args[1..], state).await,
         "clear" => datapoint_clear(state).await,
         "nodeinfo" => datapoint_nodeinfo(&args[1..], state).await,
+        "help" => print_help_datapoint(),
         other => {
             println!(
-                "Unknown datapoint subcommand: '{}'. Expected: set, get, list, del, clear, nodeinfo.",
+                "Unknown datapoint subcommand: '{}'. Expected: set, get, list, del, clear, nodeinfo, help.",
                 other
             );
         }
@@ -1072,7 +1148,8 @@ COMMANDS:
 
   Aliases: 'dp' = 'datapoint', 'del'/'rm' = 'delete'
 
-Type 'help <command>' for detailed usage, flags, and examples."
+Type 'help <command>' for detailed usage, flags, and examples.
+Help is also available as a subcommand: 'trace help', 'metric help', etc."
     );
 }
 
@@ -1148,7 +1225,11 @@ DESCRIPTION:
   - Metrics stored: Number of EKG metrics in the store
   - EKG polls:      Number of metric requests received from tracer
   - Datapoints:     Number of datapoints in the store
-  - DP polls:       Number of datapoint requests received from tracer"
+  - DP polls:       Number of datapoint requests received from tracer
+
+  If the shell was started with --logdir, also shows the tracer's log
+  directory and lists any log files found there with their sizes.
+  Log files are created by the tracer when trace objects arrive."
     );
 }
 

@@ -140,7 +140,8 @@ echo "  socket:  $WORKDIR/$SOCKET_NAME"
 echo "  logs:    $WORKDIR/logs/<node-address>/node-*.json"
 echo ""
 
-(cd "$WORKDIR" && RUST_LOG=info "$CARDANO_TRACER" --config config.yaml) &
+(cd "$WORKDIR" && RUST_LOG=info "$CARDANO_TRACER" --config config.yaml) \
+    > "$WORKDIR/tracer.log" 2>&1 &
 TRACER_PID=$!
 
 # Wait for the socket to appear
@@ -158,22 +159,24 @@ if [ ! -S "$WORKDIR/$SOCKET_NAME" ]; then
 fi
 
 echo "=== cardano-tracer is listening ==="
+echo "  tracer log: $WORKDIR/tracer.log"
 echo ""
 echo "=== Launching trace-shell ==="
 echo ""
 echo "  Try these commands inside the shell:"
 echo ""
-echo "    metric set rts.gc.bytes_allocated counter 1024"
-echo "    metric set node.peers gauge 7"
 echo "    trace add \"Hello from the shell\" --severity Warning"
+echo "    metric set node.peers gauge 7"
 echo "    datapoint nodeinfo --version 10.1.0"
 echo "    status"
 echo ""
-echo "  Then check logs:  cat $WORKDIR/logs/*/node-*.json"
-echo "  Or watch live:    tail -f $WORKDIR/logs/*/node-*.json"
+echo "  Log files appear after the first 'trace add'."
+echo "  Use 'status' to see the exact log file path, then in another terminal:"
+echo ""
+echo "    tail -f $WORKDIR/logs/*/node-*.json"
 echo ""
 
-"$TRACE_SHELL" --socket "$WORKDIR/$SOCKET_NAME" --magic "$NETWORK_MAGIC"
+"$TRACE_SHELL" --socket "$WORKDIR/$SOCKET_NAME" --magic "$NETWORK_MAGIC" --logdir "$WORKDIR/logs"
 
 echo ""
 echo "=== Session ended ==="

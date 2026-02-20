@@ -90,6 +90,16 @@ pub async fn handle_connection(
         reg.register_node(node_id.clone(), node_id.0.clone());
     }
 
+    // 2b. Eagerly create log files so they exist before any trace data arrives.
+    // write_trace_objects with an empty slice creates the directory, timestamped
+    // log file, and symlink for each configured logging output without writing
+    // any trace data.
+    {
+        let node_name = node_id.0.clone();
+        let mut mgr = log_manager.lock().await;
+        mgr.write_trace_objects(&node_name, &[]);
+    }
+
     // 3. Spawn EKG metrics handler (tracked for cleanup).
     let ekg_handle = {
         let ekg_registry = registry.clone();

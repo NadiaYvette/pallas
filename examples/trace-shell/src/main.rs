@@ -22,6 +22,11 @@ struct Args {
     /// Protocol magic (default: mainnet).
     #[arg(long, default_value_t = 764824073)]
     magic: u64,
+
+    /// Path to the tracer's log directory for status reporting.
+    /// If given, 'status' will list log files found here.
+    #[arg(long)]
+    logdir: Option<String>,
 }
 
 #[tokio::main]
@@ -63,8 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // We'll pre-feed the connect command by writing it before the shell loop.
         // Actually the cleanest approach is to just call the shell and have it
         // handle an initial connect. Let's pass the args through.
-        return shell::run_shell_with_autoconnect(state, Some(connect_args)).await;
+        return shell::run_shell_with_autoconnect(state, Some(connect_args), args.logdir).await;
     }
 
-    shell::run_shell_with_autoconnect(state, None).await
+    shell::run_shell_with_autoconnect(state, None, args.logdir).await
 }
