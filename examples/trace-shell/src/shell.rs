@@ -9,7 +9,7 @@ use pallas::network::miniprotocols::traceobjects::{
 use pallas::network::miniprotocols::{
     PROTOCOL_TFWP_DATAPOINTS, PROTOCOL_TFWP_EKG_METRICS, PROTOCOL_TFWP_TRACE_OBJECTS,
 };
-use pallas::network::multiplexer::{Bearer, Plexer, RunningPlexer};
+use pallas::network::multiplexer::{Bearer, Plexer};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -25,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum ConnectionState {
     Disconnected,
     Connected {
-        plexer_handle: RunningPlexer,
+        plexer_handle: tokio::task::JoinHandle<()>,
         task_handles: Vec<tokio::task::JoinHandle<()>>,
         address: String,
     },
@@ -55,7 +55,9 @@ pub async fn run_shell_with_autoconnect(
     // Set up rustyline editor with tab completion and history hints
     let mut editor = Editor::new()?;
     editor.set_helper(Some(ShellHelper {
-        completer: ShellCompleter,
+        completer: ShellCompleter {
+            state: Arc::clone(&state),
+        },
         hinter: HistoryHinter {},
     }));
     let hist = history_path();
@@ -153,7 +155,9 @@ pub async fn run_shell_with_autoconnect(
 // Rustyline completer, hinter, and helper
 // ---------------------------------------------------------------------------
 
-struct ShellCompleter;
+struct ShellCompleter {
+    state: SharedState,
+}
 struct ShellHelper {
     completer: ShellCompleter,
     hinter: HistoryHinter,
@@ -270,6 +274,33 @@ impl Completer for ShellCompleter {
             &[]
         };
 
+        // Try dynamic completions first (metric/datapoint names from state,
+        // or filesystem paths for connect).
+        // Uses try_read() since we're on a blocking thread and can't await.
+        let dynamic: Option<Vec<String>> = match completed {
+            ["metric", "get" | "del" | "incr" | "set"] => self.metric_names(),
+            ["datapoint" | "dp", "get" | "del" | "set"] => self.datapoint_names(),
+            // connect <socket-path>: filesystem completion
+            ["connect"] if !partial.starts_with("--") => {
+                Some(complete_path(partial))
+            }
+            _ => None,
+        };
+
+        let partial_lower = partial.to_lowercase();
+
+        if let Some(names) = dynamic {
+            let pairs: Vec<Pair> = names
+                .into_iter()
+                .filter(|n| n.to_lowercase().starts_with(&partial_lower))
+                .map(|n| Pair {
+                    display: n.clone(),
+                    replacement: n,
+                })
+                .collect();
+            return Ok((word_start, pairs));
+        }
+
         let candidates: &[&str] = match completed {
             // Level 0: top-level command
             [] => TOP_COMMANDS,
@@ -300,7 +331,6 @@ impl Completer for ShellCompleter {
             }
         };
 
-        let partial_lower = partial.to_lowercase();
         let pairs: Vec<Pair> = candidates
             .iter()
             .filter(|c| c.to_lowercase().starts_with(&partial_lower))
@@ -312,6 +342,83 @@ impl Completer for ShellCompleter {
 
         Ok((word_start, pairs))
     }
+}
+
+impl ShellCompleter {
+    /// Return sorted metric names from state, or None if the lock is contended.
+    fn metric_names(&self) -> Option<Vec<String>> {
+        let guard = self.state.try_read().ok()?;
+        let mut names: Vec<String> = guard.metrics.keys().cloned().collect();
+        names.sort();
+        Some(names)
+    }
+
+    /// Return sorted datapoint names from state, or None if the lock is contended.
+    fn datapoint_names(&self) -> Option<Vec<String>> {
+        let guard = self.state.try_read().ok()?;
+        let mut names: Vec<String> = guard.datapoints.keys().cloned().collect();
+        names.sort();
+        Some(names)
+    }
+}
+
+/// Complete a partial filesystem path.  Returns matching entries with a
+/// trailing '/' for directories so the user can keep tabbing into them.
+fn complete_path(partial: &str) -> Vec<String> {
+    use std::path::Path;
+
+    let (dir, prefix) = if partial.is_empty() {
+        (Path::new("."), "")
+    } else {
+        let p = Path::new(partial);
+        if partial.ends_with('/') {
+            (p, "")
+        } else {
+            (
+                p.parent().unwrap_or(Path::new(".")),
+                p.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            )
+        }
+    };
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+    for entry in entries.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let full = if dir == Path::new(".") && !partial.starts_with("./") {
+            name.clone()
+        } else {
+            let mut base = dir.to_string_lossy().to_string();
+            if !base.ends_with('/') {
+                base.push('/');
+            }
+            format!("{}{}", base, name)
+        };
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let display = if is_dir {
+            format!("{}/", name)
+        } else {
+            name
+        };
+        let replacement = if is_dir {
+            format!("{}/", full)
+        } else {
+            full
+        };
+        results.push((display, replacement));
+    }
+    results.sort();
+    results.into_iter().map(|(_d, r)| r).collect()
 }
 
 /// Determine which flags are valid given the completed tokens.
@@ -430,7 +537,7 @@ async fn handle_connect(
     let ekg_channel = plexer.subscribe_client(PROTOCOL_TFWP_EKG_METRICS);
     let dp_channel = plexer.subscribe_client(PROTOCOL_TFWP_DATAPOINTS);
     let hs_channel = plexer.subscribe_client(0);
-    let plexer_handle = plexer.spawn();
+    let mut plexer_handle = plexer.spawn();
 
     // Handshake
     let mut hs_client = handshake::Client::<n2c::VersionData>::new(hs_channel);
@@ -464,8 +571,14 @@ async fn handle_connect(
     let ekg_handle = tokio::spawn(handlers::run_ekg_server(ekg_channel, s2));
     let dp_handle = tokio::spawn(handlers::run_datapoints_server(dp_channel, s3));
 
+    // Monitor plexer health — prints the real error when the bearer dies.
+    let plexer_monitor = tokio::spawn(async move {
+        let err = plexer_handle.wait_first_error().await;
+        eprintln!("Plexer exited: {:?}", err);
+    });
+
     *connection = ConnectionState::Connected {
-        plexer_handle,
+        plexer_handle: plexer_monitor,
         task_handles: vec![to_handle, ekg_handle, dp_handle],
         address: target.clone(),
     };
@@ -492,7 +605,7 @@ async fn handle_disconnect(
             for h in task_handles {
                 h.abort();
             }
-            plexer_handle.abort().await;
+            plexer_handle.abort();
             println!("Disconnected from {}.", address);
         }
         ConnectionState::Disconnected => {
@@ -650,7 +763,7 @@ async fn trace_add(args: &[String], state: &SharedState) {
     };
 
     let obj = TraceObject {
-        kind: None,
+        kind: Some(0),
         to_human: Some(message.clone()),
         to_machine,
         to_namespace: namespace.clone(),
@@ -756,7 +869,7 @@ async fn trace_auto(
                 minicbor::decode(&buf).unwrap()
             };
             let obj = TraceObject {
-                kind: None,
+                kind: Some(0),
                 to_human: Some(message),
                 to_machine,
                 to_namespace: vec!["Shell".to_string(), "Auto".to_string()],

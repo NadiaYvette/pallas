@@ -490,6 +490,29 @@ impl RunningPlexer {
         self.demuxer.abort();
         self.muxer.abort();
     }
+
+    /// Wait for either the demuxer or muxer to exit and return the error.
+    ///
+    /// This is useful for monitoring: spawn a task that awaits this method
+    /// and logs the result. When one side exits, the other is aborted.
+    pub async fn wait_first_error(&mut self) -> Error {
+        select! {
+            result = &mut self.demuxer => {
+                match result {
+                    Ok(Ok(())) => Error::EmptyBearer,
+                    Ok(Err(e)) => e,
+                    Err(_) => Error::AbortFailure,
+                }
+            }
+            result = &mut self.muxer => {
+                match result {
+                    Ok(Ok(())) => Error::PlexerMux,
+                    Ok(Err(e)) => e,
+                    Err(_) => Error::AbortFailure,
+                }
+            }
+        }
+    }
 }
 
 pub struct Plexer {

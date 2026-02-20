@@ -57,7 +57,7 @@ pub async fn run_traceobjects_server(channel: multiplexer::AgentChannel, state: 
                 break;
             }
             Err(e) => {
-                error!("TraceObjects: recv error: {:?}", e);
+                error!("TraceObjects: recv error: {:?} (tracer likely closed connection; check tracer log)", e);
                 break;
             }
         }
@@ -80,25 +80,24 @@ pub async fn run_ekg_server(channel: multiplexer::AgentChannel, state: SharedSta
                     s.ekg_polls += 1;
                     let snapshot = &s.metrics;
 
-                    if snapshot.is_empty() {
-                        vec![]
-                    } else {
-                        // Filter by request type
-                        let filtered: std::collections::HashMap<String, ekgmetrics::MetricValue> =
-                            match &req {
-                                ekgmetrics::Request::GetAll
-                                | ekgmetrics::Request::GetUpdated => {
-                                    snapshot.clone()
-                                }
-                                ekgmetrics::Request::GetMetrics(names) => snapshot
-                                    .iter()
-                                    .filter(|(k, _)| names.contains(k))
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect(),
-                            };
+                    // Filter by request type
+                    let filtered: std::collections::HashMap<String, ekgmetrics::MetricValue> =
+                        match &req {
+                            ekgmetrics::Request::GetAll
+                            | ekgmetrics::Request::GetUpdated => {
+                                snapshot.clone()
+                            }
+                            ekgmetrics::Request::GetMetrics(names) => snapshot
+                                .iter()
+                                .filter(|(k, _)| names.contains(k))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                        };
 
-                        encode_ekg_response(&filtered)
-                    }
+                    // Always send [version_tag, metrics_data] even when empty.
+                    // The Haskell cardano-tracer expects this structure and will
+                    // close the connection if it receives a bare empty array.
+                    encode_ekg_response(&filtered)
                 };
                 if let Err(e) = server.send_response(response).await {
                     error!("EKG: send error: {:?}", e);
@@ -110,7 +109,7 @@ pub async fn run_ekg_server(channel: multiplexer::AgentChannel, state: SharedSta
                 break;
             }
             Err(e) => {
-                error!("EKG: recv error: {:?}", e);
+                error!("EKG: recv error: {:?} (tracer likely closed connection; check tracer log)", e);
                 break;
             }
         }
@@ -127,13 +126,14 @@ pub async fn run_ekg_server(channel: multiplexer::AgentChannel, state: SharedSta
 /// Note: We cannot use minicbor's derived `Encode` for `MetricValue` here
 /// because it encodes as `[idx, [value]]` (wrapping the field in an array),
 /// while `parse_ekg_metrics` expects `[idx, value]` (flat two-element tuple).
+/// Always returns `[version_any, metrics_any]` — the two-element structure
+/// that both the Rust `parse_ekg_metrics` and the Haskell `ekg-forward`
+/// client expect. When metrics is empty, returns `[0, []]` rather than
+/// a bare `[]`, because the Haskell cardano-tracer will close the connection
+/// if the response structure is missing the version tag.
 pub fn encode_ekg_response(
     metrics: &std::collections::HashMap<String, ekgmetrics::MetricValue>,
 ) -> Vec<AnyCbor> {
-    if metrics.is_empty() {
-        return vec![];
-    }
-
     // Encode version tag (0u8) as AnyCbor
     let mut ver_buf = Vec::new();
     minicbor::encode(&0u8, &mut ver_buf).unwrap();
@@ -179,13 +179,22 @@ pub async fn run_datapoints_server(channel: multiplexer::AgentChannel, state: Sh
                 let points = {
                     let mut s = state.write().await;
                     s.dp_polls += 1;
-                    let mut result = Vec::new();
-                    for name in &requested_names {
-                        if let Some(value) = s.datapoints.get(name) {
-                            result.push((name.clone(), value.clone()));
-                        }
-                    }
-                    result
+                    // Return ALL requested names — use None for names not in
+                    // the store.  The Haskell cardano-tracer expects every
+                    // requested name to appear in the response; omitting names
+                    // causes it to re-request immediately in a tight loop and
+                    // eventually reset the connection.
+                    requested_names
+                        .iter()
+                        .map(|name| {
+                            let value = s
+                                .datapoints
+                                .get(name)
+                                .cloned()
+                                .unwrap_or(None);
+                            (name.clone(), value)
+                        })
+                        .collect()
                 };
                 if let Err(e) = server.send_response(points).await {
                     error!("Datapoints: send error: {:?}", e);
@@ -197,7 +206,7 @@ pub async fn run_datapoints_server(channel: multiplexer::AgentChannel, state: Sh
                 break;
             }
             Err(e) => {
-                error!("Datapoints: recv error: {:?}", e);
+                error!("Datapoints: recv error: {:?} (tracer likely closed connection; check tracer log)", e);
                 break;
             }
         }
@@ -313,7 +322,13 @@ mod tests {
     fn ekg_empty_metrics() {
         let metrics = HashMap::new();
         let raw = encode_ekg_response(&metrics);
-        assert!(raw.is_empty());
+        // Even with no metrics, we must return [version, empty_list] so
+        // the Haskell cardano-tracer can decode the response structure.
+        assert_eq!(raw.len(), 2);
+        let _version: u8 = minicbor::decode(raw[0].raw_bytes()).unwrap();
+        let items: Vec<(String, AnyCbor)> =
+            minicbor::decode(raw[1].raw_bytes()).unwrap();
+        assert!(items.is_empty());
     }
 
     fn hex(data: &[u8]) -> String {
